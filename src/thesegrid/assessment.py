@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from thesegrid.capacity import estimate_firm_capacity
 from thesegrid.conditional import recommend_envelope
 from thesegrid.constraints import ConstraintSettings
 from thesegrid.economics import determine_verdict, estimate_economics
 from thesegrid.gabarits import annual_timestamps
-from thesegrid.models import ConnectionRequest, InvestmentMemo
+from thesegrid.models import ConnectionRequest, CurtailmentEstimate, InvestmentMemo
 from thesegrid.networks import load_network
 from thesegrid.risk import estimate_curtailment
 
@@ -42,11 +44,20 @@ def assess_connection(
         requested_mw=request.requested_mw,
         settings=settings,
     )
+    timestamps = annual_timestamps(year)
+
+    def is_economically_viable(mw: float, curtailment: CurtailmentEstimate) -> bool:
+        candidate_request = replace(request, requested_mw=mw)
+        return estimate_economics(candidate_request, curtailment).flexible_value_delta_eur > 0
+
     envelope = recommend_envelope(
         requested_mw=request.requested_mw,
         firm_injection_mw=firm.injection_mw,
         firm_withdrawal_mw=firm.withdrawal_mw,
-        timestamps=annual_timestamps(year),
+        timestamps=timestamps,
+        p90_tolerance_mw=request.p90_curtailment_tolerance_mw,
+        curtailment_tolerance_mwh=request.curtailment_tolerance_mwh_per_year,
+        is_economically_viable=is_economically_viable,
     )
     curtailment = estimate_curtailment(envelope.curtailment_mw)
     economics = estimate_economics(request, curtailment)
@@ -64,7 +75,9 @@ def assess_connection(
         firm_withdrawal_mw=round(firm.withdrawal_mw, 6),
         firm_capacity_mw=round(firm.firm_capacity_mw, 6),
         conditional_capacity_mw=round(envelope.conditional_capacity_mw, 6),
+        evaluated_conditional_mw=round(envelope.evaluated_mw, 6),
         recommended_envelope=envelope.name,
+        envelope_options=envelope.alternatives,
         curtailment=curtailment,
         economics=economics,
         binding_constraints=firm.binding_constraints,

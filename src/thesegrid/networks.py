@@ -36,7 +36,14 @@ def load_network(network_code: str) -> object:
 
 
 def _toy_network() -> ToyNetwork:
-    bus = pd.DataFrame({"name": ["slack", "candidate"]}, index=[0, 1])
+    bus = pd.DataFrame(
+        {
+            "name": ["slack", "candidate"],
+            "vn_kv": [110.0, 20.0],
+            "in_service": [True, True],
+        },
+        index=[0, 1],
+    )
     return ToyNetwork(name="thesegrid-toy", bus=bus)
 
 

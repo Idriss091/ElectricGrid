@@ -6,14 +6,20 @@ from thesegrid.models import (
     CurtailmentEstimate,
     EconomicAssumptions,
     EconomicComparison,
+    EnvelopeOption,
     InvestmentMemo,
 )
+from thesegrid.screening import ScreeningRequest, ScreeningResult, screen_connections
 
 __all__ = [
     "ConnectionRequest",
     "CurtailmentEstimate",
     "EconomicAssumptions",
     "EconomicComparison",
+    "EnvelopeOption",
     "InvestmentMemo",
+    "ScreeningRequest",
+    "ScreeningResult",
     "assess_connection",
+    "screen_connections",
 ]

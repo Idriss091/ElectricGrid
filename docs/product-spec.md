@@ -21,8 +21,10 @@ Primary V1 users:
 ## Outputs
 
 - Maximum firm capacity
-- Maximum conditional capacity
+- Maximum conditional capacity accepted up to the requested MW
+- Evaluated conditional MW used for the risk and economic estimate
 - Recommended flexible connection envelope
+- Envelope comparison across firm-only, RTE-inspired, and custom envelopes
 - Expected curtailment hours
 - P50/P90 curtailment estimate
 - EBITDA-at-risk estimate

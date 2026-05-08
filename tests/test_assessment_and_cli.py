@@ -28,6 +28,23 @@ def test_render_investment_memo_includes_decision_assumptions_and_uncertainty():
     assert "Assumptions" in rendered
     assert "Remaining Scientific Uncertainty" in rendered
     assert "does not replace an official grid-connection study" in rendered
+    assert "evaluated_conditional_mw" in rendered
+    assert "Envelope Comparison" in rendered
+
+
+def test_assess_connection_reports_max_conditional_capacity_separately_from_request():
+    request = ConnectionRequest(
+        network_code="toy",
+        bus_id=1,
+        requested_mw=8.0,
+        p90_curtailment_tolerance_mw=1.0,
+    )
+
+    memo = assess_connection(request, net=load_network("toy"))
+
+    assert memo.evaluated_conditional_mw == 8.0
+    assert memo.conditional_capacity_mw < request.requested_mw
+    assert memo.conditional_capacity_mw > memo.firm_capacity_mw
 
 
 def test_cli_assess_writes_reproducible_memo(tmp_path):

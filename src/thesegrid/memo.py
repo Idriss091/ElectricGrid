@@ -14,6 +14,7 @@ def render_investment_memo(memo: InvestmentMemo) -> str:
     )
     assumptions = "\n".join(f"- {assumption}" for assumption in memo.assumptions)
     uncertainty = "\n".join(f"- {item}" for item in memo.scientific_uncertainty)
+    envelope_options = _render_envelope_options(memo)
     return f"""# Flexible Connection Pre-Feasibility Memo
 
 This memo is an early-stage buyer-side decision aid. It does not replace an official grid-connection study.
@@ -37,6 +38,11 @@ This memo is an early-stage buyer-side decision aid. It does not replace an offi
 - firm_withdrawal_mw: {memo.firm_withdrawal_mw:.3f}
 - firm_capacity_mw: {memo.firm_capacity_mw:.3f}
 - conditional_capacity_mw: {memo.conditional_capacity_mw:.3f}
+- evaluated_conditional_mw: {memo.evaluated_conditional_mw:.3f}
+
+## Envelope Comparison
+
+{envelope_options}
 
 ## Curtailment Risk
 
@@ -71,3 +77,23 @@ def write_investment_memo(memo: InvestmentMemo, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(render_investment_memo(memo), encoding="utf-8")
     return output_path
+
+
+def _render_envelope_options(memo: InvestmentMemo) -> str:
+    if not memo.envelope_options:
+        return "No envelope alternatives evaluated."
+    lines = [
+        "| envelope | evaluated_mw | hours | mwh | p50_mw | p90_mw |",
+        "| --- | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for option in memo.envelope_options:
+        marker = " (recommended)" if option.name == memo.recommended_envelope else ""
+        lines.append(
+            "| "
+            f"{option.name}{marker} | {option.evaluated_mw:.3f} | "
+            f"{option.expected_curtailment_hours} | "
+            f"{option.expected_curtailment_mwh:.3f} | "
+            f"{option.p50_curtailment_mw:.3f} | "
+            f"{option.p90_curtailment_mw:.3f} |"
+        )
+    return "\n".join(lines)

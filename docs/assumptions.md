@@ -39,6 +39,13 @@ using the tool for bankable studies.
   default band, or any line/transformer exceeds the default loading limit.
 - Conditional capacity is represented as a flexible operating envelope that may
   curtail operation during restricted or constrained hours.
+- `conditional_capacity_mw` is the maximum accepted capacity up to the requested MW
+  under the configured P90 curtailment tolerance and positive flexible-value proxy.
+- `evaluated_conditional_mw` is the requested MW at which the memo's envelope,
+  curtailment, and economic risk are evaluated. It can be higher than
+  `conditional_capacity_mw` for a `no-go` case.
+- The memo compares `firm-only`, both RTE-inspired gabarits, and a custom envelope at
+  the evaluated MW before selecting the lowest-curtailment recommended envelope.
 - Until validated annual QSTS profiles are added, conditional curtailment is a
   simplified hourly risk proxy and must be labelled as such in the memo.
 

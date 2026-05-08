@@ -89,13 +89,25 @@ class EconomicComparison:
 
 
 @dataclass(frozen=True)
+class EnvelopeOption:
+    name: str
+    evaluated_mw: float
+    expected_curtailment_hours: int
+    expected_curtailment_mwh: float
+    p50_curtailment_mw: float
+    p90_curtailment_mw: float
+
+
+@dataclass(frozen=True)
 class InvestmentMemo:
     request: ConnectionRequest
     firm_injection_mw: float
     firm_withdrawal_mw: float
     firm_capacity_mw: float
     conditional_capacity_mw: float
+    evaluated_conditional_mw: float
     recommended_envelope: str
+    envelope_options: tuple[EnvelopeOption, ...]
     curtailment: CurtailmentEstimate
     economics: EconomicComparison
     binding_constraints: tuple[ConstraintViolation, ...]

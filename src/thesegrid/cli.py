@@ -8,6 +8,7 @@ from typing import Sequence
 from thesegrid.assessment import assess_connection
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
+from thesegrid.screening import ScreeningRequest, screen_connections, write_screening_outputs
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -15,6 +16,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "assess":
         return _assess(args)
+    if args.command == "screen":
+        return _screen(args)
     parser.print_help()
     return 2
 
@@ -45,6 +48,34 @@ def _build_parser() -> argparse.ArgumentParser:
     assess.add_argument("--gross-margin-eur-per-mwh", type=float, default=0.0)
     assess.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
     assess.add_argument("--waiting-cost-eur-per-mw-year", type=float, default=50_000.0)
+    screen = subparsers.add_parser("screen", help="Rank candidate BESS connection buses")
+    screen.add_argument("--network", required=True, help="SimBench code, or 'toy' for smoke tests")
+    screen.add_argument("--requested-mw", required=True, type=float, help="Requested BESS MW")
+    screen.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
+    screen.add_argument("--output", type=Path, required=True, help="Output directory")
+    screen.add_argument("--top-n", type=int, default=10, help="Rows to show in Markdown summary")
+    screen.add_argument(
+        "--candidate-policy",
+        default="mv_active",
+        choices=["mv_active"],
+        help="Candidate bus selection policy",
+    )
+    screen.add_argument(
+        "--curtailment-tolerance-mwh",
+        type=float,
+        default=0.0,
+        help="Annual curtailment tolerance in MWh",
+    )
+    screen.add_argument(
+        "--p90-curtailment-tolerance-mw",
+        type=float,
+        default=0.0,
+        help="P90 hourly curtailment tolerance in MW",
+    )
+    screen.add_argument("--reinforcement-wait-years", type=float, default=5.0)
+    screen.add_argument("--gross-margin-eur-per-mwh", type=float, default=0.0)
+    screen.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
+    screen.add_argument("--waiting-cost-eur-per-mw-year", type=float, default=50_000.0)
     return parser
 
 
@@ -74,6 +105,28 @@ def _default_output_path(request: ConnectionRequest) -> Path:
     network = re.sub(r"[^A-Za-z0-9_.-]+", "-", request.network_code)
     requested = f"{request.requested_mw:.3f}".rstrip("0").rstrip(".")
     return Path("results") / f"{network}_bus-{request.bus_id}_{requested}mw" / "memo.md"
+
+
+def _screen(args: argparse.Namespace) -> int:
+    request = ScreeningRequest(
+        network_code=args.network,
+        requested_mw=args.requested_mw,
+        asset=args.asset,
+        top_n=args.top_n,
+        candidate_policy=args.candidate_policy,
+        curtailment_tolerance_mwh_per_year=args.curtailment_tolerance_mwh,
+        p90_curtailment_tolerance_mw=args.p90_curtailment_tolerance_mw,
+        reinforcement_wait_years=args.reinforcement_wait_years,
+        economics=EconomicAssumptions(
+            gross_margin_eur_per_mwh=args.gross_margin_eur_per_mwh,
+            curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
+            waiting_cost_eur_per_mw_year=args.waiting_cost_eur_per_mw_year,
+        ),
+    )
+    result = screen_connections(request)
+    outputs = write_screening_outputs(result, args.output)
+    print(f"screened {len(result.rows)} buses: {outputs.csv_path} {outputs.summary_path}")
+    return 0
 
 
 if __name__ == "__main__":
