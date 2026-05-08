@@ -11,6 +11,7 @@ The product estimates:
 - recommended flexible connection envelope;
 - expected curtailment risk;
 - economic value of connecting now under constraints versus waiting for grid reinforcement.
+- Read `docs/data-and-modeling.md` before implementing any power-flow, hosting-capacity, QSTS, or techno-economic module.
 
 ## Product thesis
 

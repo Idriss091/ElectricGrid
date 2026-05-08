@@ -1,0 +1,15 @@
+[project]
+name = "thesegrid"
+version = "0.1.0"
+description = "Pre-feasibility engine for flexible grid connections"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
