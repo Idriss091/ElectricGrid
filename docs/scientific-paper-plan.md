@@ -25,3 +25,30 @@ The contribution is transforming hosting capacity into:
 - operational envelope;
 - curtailment risk;
 - economic decision.
+
+## Experimental protocol for the MVP paper
+
+1. Use SimBench networks as the reproducible benchmark layer.
+2. Screen candidate buses and compute directional BESS firm capacity with pandapower.
+3. Generate conditional envelopes using explicit horo-seasonal gabarits and custom
+   hourly envelopes.
+4. Estimate curtailment risk as expected hours, expected MWh, P50, and P90.
+5. Translate curtailment into EBITDA-at-risk and compare against a wait-for-reinforcement
+   proxy.
+6. Report the decision as go, no-go, or go-with-conditions.
+
+## Baseline claims to avoid
+
+- Do not claim that the method replaces official grid-connection studies.
+- Do not claim French bankability from SimBench alone.
+- Do not claim dynamic validation until QSTS or equivalent annual time-series studies
+  have been run.
+- Do not use RTE market-price data commercially without a suitable license.
+
+## Initial journal strategy
+
+- arXiv first to establish the method and terminology.
+- Applied Energy as the ambitious target if the probabilistic and economic contribution
+  is strong enough.
+- Sustainable Energy, Grids and Networks or Electric Power Systems Research as more
+  direct power-system alternatives.

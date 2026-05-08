@@ -3,9 +3,29 @@ name = "thesegrid"
 version = "0.1.0"
 description = "Pre-feasibility engine for flexible grid connections"
 requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pandapower",
+    "simbench",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+thesegrid = "thesegrid.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 100
