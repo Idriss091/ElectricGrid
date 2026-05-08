@@ -1,8 +1,0 @@
-numpy
-pandas
-pandapower
-simbench
-
-[dev]
-pytest
-ruff
