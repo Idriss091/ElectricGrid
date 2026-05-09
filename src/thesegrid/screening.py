@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -44,6 +45,7 @@ class ScreeningRequest:
     requested_mw: float
     asset: str = "bess"
     top_n: int = 10
+    max_buses: int | None = None
     candidate_policy: CandidatePolicy = "mv_active"
     curtailment_tolerance_mwh_per_year: float = 0.0
     p90_curtailment_tolerance_mw: float = 0.0
@@ -59,6 +61,8 @@ class ScreeningRequest:
             raise ValueError("V1 supports BESS assets only")
         if self.top_n <= 0:
             raise ValueError("top_n must be positive")
+        if self.max_buses is not None and self.max_buses <= 0:
+            raise ValueError("max_buses must be positive when provided")
         if self.candidate_policy != "mv_active":
             raise ValueError("candidate_policy must be 'mv_active'")
 
@@ -103,9 +107,12 @@ class ScreeningOutputPaths:
 
 def screen_connections(request: ScreeningRequest, net: object | None = None) -> ScreeningResult:
     network = load_network(request.network_code) if net is None else net
+    bus_ids = candidate_bus_ids(network, request.candidate_policy)
+    if request.max_buses is not None:
+        bus_ids = bus_ids[: request.max_buses]
     rows = [
         _screen_bus(request, network, bus_id)
-        for bus_id in candidate_bus_ids(network, request.candidate_policy)
+        for bus_id in bus_ids
     ]
     ranked = sort_screening_rows(tuple(rows))
     return ScreeningResult(
@@ -342,14 +349,79 @@ def _verdict_counts(rows: tuple[ScreeningRow, ...]) -> dict[str, int]:
 
 
 def _constraint_counts(rows: tuple[ScreeningRow, ...]) -> str:
-    counts: dict[str, int] = {}
+    counts: dict[tuple[str, int, str], _ConstraintAggregate] = {}
     for row in rows:
         if not row.main_constraint:
             continue
-        counts[row.main_constraint] = counts.get(row.main_constraint, 0) + 1
+        parsed = _parse_constraint_description(row.main_constraint)
+        if parsed is None:
+            key = (row.main_constraint, -1, "")
+            current = counts.get(key)
+            counts[key] = _ConstraintAggregate(
+                label=row.main_constraint,
+                count=1 if current is None else current.count + 1,
+                max_value=None,
+                limit=None,
+            )
+            continue
+        current = counts.get(parsed.key)
+        counts[parsed.key] = _ConstraintAggregate(
+            label=parsed.label,
+            count=1 if current is None else current.count + 1,
+            max_value=parsed.value if current is None else max(current.max_value or parsed.value, parsed.value),
+            limit=parsed.limit,
+        )
     if not counts:
         return "- None across evaluated candidate buses."
     return "\n".join(
-        f"- {constraint}: {count}"
-        for constraint, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:10]
+        f"- {aggregate.render()}"
+        for aggregate in sorted(counts.values(), key=lambda item: (-item.count, item.label))[:10]
+    )
+
+
+@dataclass(frozen=True)
+class _ParsedConstraint:
+    key: tuple[str, int, str]
+    label: str
+    value: float
+    limit: float
+
+
+@dataclass(frozen=True)
+class _ConstraintAggregate:
+    label: str
+    count: int
+    max_value: float | None
+    limit: float | None
+
+    def render(self) -> str:
+        if self.max_value is None or self.limit is None:
+            return f"{self.label}: count={self.count}"
+        return (
+            f"{self.label}: count={self.count} "
+            f"max={self.max_value:.3f} limit={self.limit:.3f}"
+        )
+
+
+_CONSTRAINT_DESCRIPTION = re.compile(
+    r"^(?P<type>[^\[]+)\[(?P<id>-?\d+)\]\s+"
+    r"(?P<name>.*?)\s+"
+    r"(?P<metric>\S+)=(?P<value>[-+0-9.eE]+)\s+"
+    r"limit=(?P<limit>[-+0-9.eE]+)$"
+)
+
+
+def _parse_constraint_description(description: str) -> _ParsedConstraint | None:
+    match = _CONSTRAINT_DESCRIPTION.match(description)
+    if match is None:
+        return None
+    element_type = match.group("type")
+    element_id = int(match.group("id"))
+    metric = match.group("metric")
+    name = match.group("name")
+    return _ParsedConstraint(
+        key=(element_type, element_id, metric),
+        label=f"{element_type}[{element_id}] {name} {metric}",
+        value=float(match.group("value")),
+        limit=float(match.group("limit")),
     )

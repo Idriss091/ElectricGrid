@@ -13,6 +13,9 @@ from thesegrid.networks import ToyNetwork
 class DispatchEvaluation:
     feasible: bool
     violations: tuple[ConstraintViolation, ...]
+    min_vm_pu: float | None = None
+    max_vm_pu: float | None = None
+    max_loading_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -135,7 +138,13 @@ def evaluate_dispatch(
         )
 
     violations = tuple(check_constraints(working_net, settings))
-    return DispatchEvaluation(feasible=not violations, violations=violations)
+    return DispatchEvaluation(
+        feasible=not violations,
+        violations=violations,
+        min_vm_pu=_result_min(working_net, "res_bus", "vm_pu"),
+        max_vm_pu=_result_max(working_net, "res_bus", "vm_pu"),
+        max_loading_percent=_max_loading_percent(working_net),
+    )
 
 
 def _evaluate_toy_dispatch(
@@ -186,7 +195,13 @@ def _evaluate_toy_dispatch(
                 limit=settings.max_vm_pu,
             )
         )
-    return DispatchEvaluation(feasible=not violations, violations=tuple(violations))
+    return DispatchEvaluation(
+        feasible=not violations,
+        violations=tuple(violations),
+        min_vm_pu=round(min_vm_pu, 6),
+        max_vm_pu=round(max_vm_pu, 6),
+        max_loading_percent=round(loading_percent, 6),
+    )
 
 
 def _merge_constraints(
@@ -202,3 +217,28 @@ def _merge_constraints(
         seen.add(key)
         merged.append(violation)
     return tuple(merged)
+
+
+def _result_min(net: object, table_name: str, column: str) -> float | None:
+    table = getattr(net, table_name, None)
+    if table is None or column not in table or table.empty:
+        return None
+    return round(float(table[column].min()), 6)
+
+
+def _result_max(net: object, table_name: str, column: str) -> float | None:
+    table = getattr(net, table_name, None)
+    if table is None or column not in table or table.empty:
+        return None
+    return round(float(table[column].max()), 6)
+
+
+def _max_loading_percent(net: object) -> float | None:
+    values: list[float] = []
+    for table_name in ("res_line", "res_trafo", "res_trafo3w"):
+        value = _result_max(net, table_name, "loading_percent")
+        if value is not None:
+            values.append(value)
+    if not values:
+        return None
+    return round(max(values), 6)

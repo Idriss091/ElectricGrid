@@ -61,6 +61,55 @@ def test_screen_connections_returns_ranked_top_rows_for_toy_network():
     assert result.rows[0].bus_id == 1
 
 
+def test_screen_connections_can_limit_evaluated_candidate_buses():
+    result = screen_connections(
+        ScreeningRequest(
+            network_code="toy",
+            requested_mw=0.5,
+            max_buses=1,
+        )
+    )
+
+    assert len(result.rows) == 1
+    assert result.request.max_buses == 1
+
+
+def test_screening_summary_groups_constraints_by_element_metric_not_value():
+    result = screen_connections(ScreeningRequest(network_code="toy", requested_mw=0.5))
+    rows = (
+        _row(
+            bus_id=1,
+            verdict="no-go",
+            value=0.0,
+            conditional=1.0,
+            p90=0.0,
+            main_constraint="bus[59] MV1.101 Bus 59 bus.vm_pu.max=1.053 limit=1.050",
+        ),
+        _row(
+            bus_id=2,
+            verdict="no-go",
+            value=0.0,
+            conditional=1.0,
+            p90=0.0,
+            main_constraint="bus[59] MV1.101 Bus 59 bus.vm_pu.max=1.054 limit=1.050",
+        ),
+    )
+    grouped = type(result)(
+        request=result.request,
+        rows=rows,
+        top_rows=rows,
+        network_code=result.network_code,
+        requested_mw=result.requested_mw,
+        ranking_policy=result.ranking_policy,
+    )
+
+    rendered = render_screening_summary(grouped)
+
+    assert "bus[59] MV1.101 Bus 59 bus.vm_pu.max: count=2 max=1.054 limit=1.050" in rendered
+    assert "bus.vm_pu.max=1.053" not in rendered
+    assert "bus.vm_pu.max=1.054" not in rendered
+
+
 def test_write_screening_outputs_creates_csv_and_markdown(tmp_path):
     result = screen_connections(ScreeningRequest(network_code="toy", requested_mw=0.5))
 
@@ -116,6 +165,26 @@ def test_cli_screen_writes_csv_and_summary(tmp_path):
     assert (tmp_path / "screening_summary.md").exists()
 
 
+def test_cli_screen_accepts_max_buses(tmp_path):
+    exit_code = main(
+        [
+            "screen",
+            "--network",
+            "toy",
+            "--requested-mw",
+            "0.5",
+            "--max-buses",
+            "1",
+            "--output",
+            str(tmp_path),
+        ]
+    )
+
+    assert exit_code == 0
+    with (tmp_path / "screening_summary.md").open(encoding="utf-8") as handle:
+        assert "evaluated_buses: 1" in handle.read()
+
+
 def _row(
     *,
     bus_id: int,
@@ -123,6 +192,7 @@ def _row(
     value: float,
     conditional: float,
     p90: float,
+    main_constraint: str = "",
 ) -> ScreeningRow:
     return ScreeningRow(
         rank=0,
@@ -142,5 +212,5 @@ def _row(
         p90_curtailment_mw=p90,
         ebitda_at_risk_eur=0.0,
         flexible_value_delta_eur=value,
-        main_constraint="",
+        main_constraint=main_constraint,
     )

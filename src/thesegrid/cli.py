@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from pathlib import Path
 from typing import Sequence
 
 from thesegrid.assessment import assess_connection
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
+from thesegrid.qsts import QstsRequest, run_qsts, write_qsts_outputs
 from thesegrid.screening import ScreeningRequest, screen_connections, write_screening_outputs
 
 
@@ -18,6 +20,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _assess(args)
     if args.command == "screen":
         return _screen(args)
+    if args.command == "qsts":
+        return _qsts(args)
     parser.print_help()
     return 2
 
@@ -55,6 +59,11 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--output", type=Path, required=True, help="Output directory")
     screen.add_argument("--top-n", type=int, default=10, help="Rows to show in Markdown summary")
     screen.add_argument(
+        "--max-buses",
+        type=int,
+        help="Maximum number of candidate buses to evaluate before ranking",
+    )
+    screen.add_argument(
         "--candidate-policy",
         default="mv_active",
         choices=["mv_active"],
@@ -76,6 +85,13 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--gross-margin-eur-per-mwh", type=float, default=0.0)
     screen.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
     screen.add_argument("--waiting-cost-eur-per-mw-year", type=float, default=50_000.0)
+    qsts = subparsers.add_parser("qsts", help="Validate top screened buses with QSTS")
+    qsts.add_argument("--network", required=True, help="SimBench code; 'toy' is refused for QSTS")
+    qsts.add_argument("--screening-csv", required=True, type=Path, help="Input screening.csv path")
+    qsts.add_argument("--requested-mw", required=True, type=float, help="Requested BESS MW")
+    qsts.add_argument("--output", type=Path, required=True, help="Output directory")
+    qsts.add_argument("--top-n", type=int, default=10, help="Top screening rows to validate")
+    qsts.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
     return parser
 
 
@@ -113,6 +129,7 @@ def _screen(args: argparse.Namespace) -> int:
         requested_mw=args.requested_mw,
         asset=args.asset,
         top_n=args.top_n,
+        max_buses=args.max_buses,
         candidate_policy=args.candidate_policy,
         curtailment_tolerance_mwh_per_year=args.curtailment_tolerance_mwh,
         p90_curtailment_tolerance_mw=args.p90_curtailment_tolerance_mw,
@@ -123,9 +140,30 @@ def _screen(args: argparse.Namespace) -> int:
             waiting_cost_eur_per_mw_year=args.waiting_cost_eur_per_mw_year,
         ),
     )
+    limit = f" up to {request.max_buses}" if request.max_buses is not None else ""
+    print(f"screening{limit} candidate buses...", file=sys.stderr)
     result = screen_connections(request)
     outputs = write_screening_outputs(result, args.output)
     print(f"screened {len(result.rows)} buses: {outputs.csv_path} {outputs.summary_path}")
+    return 0
+
+
+def _qsts(args: argparse.Namespace) -> int:
+    try:
+        request = QstsRequest(
+            network_code=args.network,
+            screening_csv=args.screening_csv,
+            requested_mw=args.requested_mw,
+            top_n=args.top_n,
+            asset=args.asset,
+        )
+        print(f"validating top {request.top_n} buses with QSTS...", file=sys.stderr)
+        result = run_qsts(request)
+    except (ImportError, ValueError) as exc:
+        print(f"qsts error: {exc}")
+        return 2
+    outputs = write_qsts_outputs(result, args.output)
+    print(f"qsts validated {len(result.buses)} buses: {outputs.results_csv_path} {outputs.summary_path}")
     return 0
 
 

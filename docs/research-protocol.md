@@ -24,6 +24,8 @@ investment-grade flexible connection proposal:
 8. Compare connect-now-flexible against wait-for-reinforcement using configurable
    economic proxies.
 9. Emit a machine-generated memo into `results/<run_id>/memo.md`.
+10. For top-ranked buses, run QSTS validation using SimBench profiles before making
+    claims about hourly envelope feasibility.
 
 ## Multi-bus screening experiment
 
@@ -42,6 +44,26 @@ The first repeatable product/science experiment is a multi-bus BESS screening ru
 This screening is the bridge between the commercial site-selection workflow and the
 paper's benchmark tables. It remains a pre-feasibility proxy until time-series/QSTS
 validation is added for the best-ranked buses.
+
+## QSTS validation experiment
+
+The first QSTS workflow validates top-ranked BESS candidates from a screening CSV:
+
+1. Load `screening.csv` and select the top N rows by screening rank.
+2. Load the same SimBench network and its annual load, generation, and storage
+   profiles.
+3. Convert sub-hourly SimBench profiles to hourly profiles when needed for the MVP
+   validation run.
+4. For each selected bus and each time step, evaluate BESS injection and withdrawal.
+5. Record convergence, voltage, line loading, transformer loading, feasible MW,
+   curtailed MW, and the binding constraint.
+6. Summarize the worst directional curtailment per timestamp as QSTS expected hours,
+   MWh, P50, and P90.
+7. Write `qsts_results.csv`, `qsts_summary.md`, and per-bus detail CSV files.
+
+QSTS output must state that it is based on actual hourly power-flow validation.
+It must also state that the study still excludes short-circuit, protection, dynamic
+stability, N-1 security, harmonic limits, and official operator planning criteria.
 
 ## Product outputs
 
@@ -65,6 +87,14 @@ For multi-bus screening, the product also emits:
 - verdict distribution;
 - most frequent binding constraints.
 
+For QSTS validation, the product emits:
+
+- top-N QSTS validation table;
+- per-bus hourly detail files;
+- comparison fields linking static firm/conditional capacity to QSTS curtailment;
+- explicit distinction between proxy screening results and actual hourly power-flow
+  validation.
+
 ## Scientific outputs
 
 The paper should use the same experiment outputs to build:
@@ -72,6 +102,8 @@ The paper should use the same experiment outputs to build:
 - a formal definition of flexible interconnection envelope synthesis;
 - a benchmark study over multiple buses and networks;
 - sensitivity analysis over curtailment tolerance, waiting time, and economic proxies;
+- QSTS comparison of static proxy curtailment against time-varying SimBench operating
+  points;
 - a limitations section separating pre-feasibility from official network studies.
 
 ## Reproducibility rules

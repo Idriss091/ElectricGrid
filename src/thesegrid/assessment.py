@@ -24,8 +24,8 @@ ASSUMPTIONS = (
 SCIENTIFIC_UNCERTAINTY = (
     "SimBench benchmark networks are not a substitute for confidential French operator models.",
     "The MVP does not cover short-circuit, stability, protection, N-1, or dynamic studies.",
-    "Conditional envelopes use simplified hourly curtailment logic until validated QSTS profiles "
-    "are added.",
+    "Single-bus assessment memos use simplified hourly curtailment logic unless the QSTS "
+    "validation workflow is run separately.",
     "Commercial bankability still depends on the official grid-connection study.",
 )
 

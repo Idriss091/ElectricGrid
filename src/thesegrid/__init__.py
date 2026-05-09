@@ -9,6 +9,7 @@ from thesegrid.models import (
     EnvelopeOption,
     InvestmentMemo,
 )
+from thesegrid.qsts import QstsRequest, QstsResult, run_qsts
 from thesegrid.screening import ScreeningRequest, ScreeningResult, screen_connections
 
 __all__ = [
@@ -18,8 +19,11 @@ __all__ = [
     "EconomicComparison",
     "EnvelopeOption",
     "InvestmentMemo",
+    "QstsRequest",
+    "QstsResult",
     "ScreeningRequest",
     "ScreeningResult",
     "assess_connection",
+    "run_qsts",
     "screen_connections",
 ]

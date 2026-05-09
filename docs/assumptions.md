@@ -46,8 +46,11 @@ using the tool for bankable studies.
   `conditional_capacity_mw` for a `no-go` case.
 - The memo compares `firm-only`, both RTE-inspired gabarits, and a custom envelope at
   the evaluated MW before selecting the lowest-curtailment recommended envelope.
-- Until validated annual QSTS profiles are added, conditional curtailment is a
-  simplified hourly risk proxy and must be labelled as such in the memo.
+- Single-bus assessment memos use a simplified hourly curtailment proxy.
+- QSTS validation replays SimBench time-varying operating points and checks BESS
+  injection and withdrawal with repeated pandapower power flows.
+- QSTS results are a higher-evidence validation layer than the static proxy, but they
+  remain benchmark results unless validated against operator study cases.
 
 ## French V1 gabarits
 
@@ -81,5 +84,6 @@ These calendars are modeled as half-open hourly intervals: 10:00 is restricted,
 - SimBench networks are benchmarks and do not replace French operator models.
 - France-specific validation requires public RTE context and, where possible,
   confidential operator data or validated study cases.
-- The conditional-capacity method needs QSTS validation before scientific claims are
-  made beyond pre-feasibility.
+- QSTS validation improves the conditional-capacity method, but scientific claims beyond
+  pre-feasibility still require sensitivity studies, additional networks, and comparison
+  against official or operator-grade study assumptions.
