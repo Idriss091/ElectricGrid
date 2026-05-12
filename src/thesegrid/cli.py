@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Sequence
 
 from thesegrid.assessment import assess_connection
+from thesegrid.constraints import ConstraintSettings
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
 from thesegrid.qsts import QstsRequest, run_qsts, write_qsts_outputs
@@ -92,6 +93,49 @@ def _build_parser() -> argparse.ArgumentParser:
     qsts.add_argument("--output", type=Path, required=True, help="Output directory")
     qsts.add_argument("--top-n", type=int, default=10, help="Top screening rows to validate")
     qsts.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
+    qsts.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
+    qsts.add_argument("--duration-hours", type=int, help="Number of hourly profile steps to validate")
+    qsts.add_argument(
+        "--sample-every-n-hours",
+        type=int,
+        default=1,
+        help="Evaluate every Nth hourly profile step",
+    )
+    qsts.add_argument(
+        "--stratified-sample",
+        action="store_true",
+        help="Select one representative hour per month and V1 time block",
+    )
+    qsts.add_argument(
+        "--voltage-min-pu",
+        type=float,
+        default=0.95,
+        help="Minimum accepted bus voltage in per unit",
+    )
+    qsts.add_argument(
+        "--voltage-max-pu",
+        type=float,
+        default=1.05,
+        help="Maximum accepted bus voltage in per unit",
+    )
+    qsts.add_argument(
+        "--max-loading-percent",
+        type=float,
+        default=100.0,
+        help="Maximum accepted line/trafo loading percent",
+    )
+    qsts.add_argument(
+        "--p90-curtailment-tolerance-mw",
+        type=float,
+        default=0.0,
+        help="Accepted QSTS P90 hourly curtailment in MW for go-with-conditions",
+    )
+    qsts.add_argument(
+        "--expected-curtailment-tolerance-mwh",
+        type=float,
+        default=0.0,
+        help="Accepted QSTS expected curtailed MWh for go-with-conditions",
+    )
     return parser
 
 
@@ -156,9 +200,20 @@ def _qsts(args: argparse.Namespace) -> int:
             requested_mw=args.requested_mw,
             top_n=args.top_n,
             asset=args.asset,
+            start_hour=args.start_hour,
+            duration_hours=args.duration_hours,
+            sample_every_n_hours=args.sample_every_n_hours,
+            stratified_sample=args.stratified_sample,
+            p90_curtailment_tolerance_mw=args.p90_curtailment_tolerance_mw,
+            expected_curtailment_tolerance_mwh=args.expected_curtailment_tolerance_mwh,
+        )
+        settings = ConstraintSettings(
+            min_vm_pu=args.voltage_min_pu,
+            max_vm_pu=args.voltage_max_pu,
+            max_loading_percent=args.max_loading_percent,
         )
         print(f"validating top {request.top_n} buses with QSTS...", file=sys.stderr)
-        result = run_qsts(request)
+        result = run_qsts(request, settings=settings)
     except (ImportError, ValueError) as exc:
         print(f"qsts error: {exc}")
         return 2

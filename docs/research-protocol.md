@@ -55,15 +55,28 @@ The first QSTS workflow validates top-ranked BESS candidates from a screening CS
 3. Convert sub-hourly SimBench profiles to hourly profiles when needed for the MVP
    validation run.
 4. For each selected bus and each time step, evaluate BESS injection and withdrawal.
-5. Record convergence, voltage, line loading, transformer loading, feasible MW,
-   curtailed MW, and the binding constraint.
-6. Summarize the worst directional curtailment per timestamp as QSTS expected hours,
+5. Run a no-candidate baseline for the same time step, then classify candidate
+   violations as pre-existing, worsened, or new.
+6. Record convergence, voltage, line loading, transformer loading, feasible MW,
+   curtailed MW, raw binding constraint, and incremental binding constraint.
+7. Summarize the worst directional curtailment per timestamp as QSTS expected hours,
    MWh, P50, and P90.
-7. Write `qsts_results.csv`, `qsts_summary.md`, and per-bus detail CSV files.
+8. Classify `go-with-conditions` only when QSTS P90 curtailed MW and expected curtailed
+   MWh are within the configured QSTS curtailment tolerances.
+9. Use stratified QSTS sampling for bounded annual campaigns when full-year validation is
+   not yet practical, so samples cover month and contractual time-block diversity instead
+   of aliasing to a single hour of day.
+10. Synthesize a compact contractual envelope from the QSTS-derived hourly envelope using
+   RTE-inspired V1 seasons, fixed time blocks, and P10 allowed MW as the conservative
+   recommended value.
+11. Write `qsts_results.csv`, `investor_decision.csv`, `qsts_summary.md`,
+    `qsts_envelope.csv`, `qsts_envelope_summary.csv`, `contractual_envelope.csv`, and
+    per-bus detail CSV files.
 
-QSTS output must state that it is based on actual hourly power-flow validation.
-It must also state that the study still excludes short-circuit, protection, dynamic
-stability, N-1 security, harmonic limits, and official operator planning criteria.
+QSTS output must state that it is based on actual hourly power-flow validation and
+that verdicts are baseline-aware. It must also state that the study still excludes
+short-circuit, protection, dynamic stability, N-1 security, harmonic limits, and
+official operator planning criteria.
 
 ## Product outputs
 
@@ -90,8 +103,13 @@ For multi-bus screening, the product also emits:
 For QSTS validation, the product emits:
 
 - top-N QSTS validation table;
+- investor decision CSV with verdict, firm/conditional MW, QSTS P90 MW, expected MWh,
+  and main recurring constraint;
 - per-bus hourly detail files;
 - comparison fields linking static firm/conditional capacity to QSTS curtailment;
+- the QSTS P90 MW and expected MWh curtailment tolerances used for the verdict;
+- a contractual-envelope table that distinguishes conservative P10 allowed MW from
+  diagnostic P50/min allowed MW and P90 curtailed MW;
 - explicit distinction between proxy screening results and actual hourly power-flow
   validation.
 

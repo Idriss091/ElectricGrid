@@ -49,6 +49,19 @@ using the tool for bankable studies.
 - Single-bus assessment memos use a simplified hourly curtailment proxy.
 - QSTS validation replays SimBench time-varying operating points and checks BESS
   injection and withdrawal with repeated pandapower power flows.
+- QSTS can use either regular interval sampling or stratified sampling. The V1 stratified
+  sampling selects representative hours across months and the fixed contractual-envelope
+  time blocks to avoid aliasing all samples into the same hour of day.
+- QSTS verdicts are incremental against a no-candidate baseline. Pre-existing
+  benchmark-network violations are reported in detail files but do not trigger
+  curtailment unless the candidate creates a new violation or worsens an existing one.
+- QSTS `go-with-conditions` requires the QSTS P90 curtailed MW to be within the
+  user-configured `p90_curtailment_tolerance_mw` and QSTS expected curtailed MWh to
+  be within `expected_curtailment_tolerance_mwh`; both default tolerances are 0.
+- The QSTS contractual-envelope export is a compact investor-facing synthesis of the
+  hourly QSTS-derived envelope. It groups by direction, RTE-inspired V1 season, and
+  fixed time block, and uses P10 allowed MW as the recommended conservative contract
+  value. This is a pre-feasibility synthesis, not an official RTE operating gabarit.
 - QSTS results are a higher-evidence validation layer than the static proxy, but they
   remain benchmark results unless validated against operator study cases.
 
@@ -78,6 +91,9 @@ These calendars are modeled as half-open hourly intervals: 10:00 is restricted,
 - `go-with-conditions`: requested MW is within conditional capacity, P90 curtailment
   is within user tolerance, and the flexible option has positive proxy value.
 - `no-go`: all other cases.
+- QSTS verdicts use the same labels but apply QSTS-specific tolerances: `go` requires
+  zero QSTS P90 curtailed MW and zero expected curtailed MWh; `go-with-conditions`
+  requires both configured QSTS P90 MW and expected MWh tolerances to be met.
 
 ## Remaining uncertainty
 

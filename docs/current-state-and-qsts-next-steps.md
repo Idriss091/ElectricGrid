@@ -5,209 +5,284 @@ Date: 2026-05-09
 ## Purpose
 
 This document records the current state of the BESS pre-feasibility MVP after the
-latest audit, what was tested, what works, what remains weak, and why the next
-implementation step should be QSTS validation on the top-ranked buses.
+latest QSTS audit. It summarizes what was tested, what now works, what remains weak,
+and what should be implemented next.
 
 The project remains a buyer-side decision engine for flexible grid-connection
 pre-feasibility. It does not replace an official grid-connection study.
 
 ## Current Product State
 
-The current MVP can:
+The MVP can now:
 
 - assess one candidate BESS connection bus;
 - estimate firm injection and withdrawal capacity;
-- estimate a maximum accepted conditional capacity up to the requested MW;
+- estimate accepted conditional capacity up to the requested MW;
 - compare firm-only, RTE-inspired gabarits, and a custom envelope;
-- estimate curtailment risk with P50/P90 metrics;
-- estimate a configurable economic proxy for connecting now versus waiting;
-- return a `go`, `go-with-conditions`, or `no-go` verdict;
-- screen multiple MV candidate buses and rank them in a CSV and Markdown summary.
+- estimate static proxy curtailment with expected MWh, P50, and P90 metrics;
+- estimate a configurable connect-now versus wait-for-reinforcement economic proxy;
+- return a `go`, `go-with-conditions`, or `no-go` verdict for the static assessment;
+- screen multiple MV candidate buses and rank them in CSV and Markdown outputs;
+- run a QSTS validation workflow on selected screened buses;
+- compute QSTS curtailment from hourly power-flow replay;
+- classify QSTS violations incrementally against a no-candidate baseline;
+- reuse no-candidate QSTS baseline states across buses in the same run;
+- use optional stratified QSTS sampling to cover month/time-block diversity in bounded
+  annual campaigns;
+- apply an explicit QSTS P90 curtailment tolerance to the QSTS verdict;
+- export a compact investor decision table in `investor_decision.csv`;
+- export a QSTS-derived hourly flexible envelope in `qsts_envelope.csv`;
+- export a compact month/hour/direction envelope in `qsts_envelope_summary.csv`;
+- export an investor-facing contractual envelope in `contractual_envelope.csv`, grouped by
+  direction, RTE-inspired V1 season, and fixed time block;
+- compare firm-only, static custom, RTE-inspired, and QSTS-derived envelopes in
+  `qsts_summary.md`;
+- record QSTS baseline diagnostics and runtime constraint settings.
 
 The main user-facing commands are:
 
 ```bash
 thesegrid assess --network <network_code> --bus <bus_id> --requested-mw <mw> --output <memo_path>
 thesegrid screen --network <network_code> --requested-mw <mw> --output <output_dir>
+thesegrid qsts --network <network_code> --screening-csv <screening_csv> --requested-mw <mw> --top-n <n> --start-hour <h> --duration-hours <h> --sample-every-n-hours <n> --stratified-sample --voltage-min-pu <pu> --voltage-max-pu <pu> --max-loading-percent <percent> --p90-curtailment-tolerance-mw <mw> --expected-curtailment-tolerance-mwh <mwh> --output <output_dir>
 ```
 
 ## Verification Performed
 
-The codebase passed the automated checks:
+The latest automated checks passed after the envelope implementation:
 
-- `python -m pytest -q`: 24 passed, 1 skipped;
-- `.venv/bin/python -m pytest -q`: 25 passed;
+- `python -m pytest -q`: 49 passed, 1 skipped;
+- `.venv/bin/python -m pytest -q`: 50 passed;
 - `python -m ruff check .`: passed.
 
-The repository was clean before generating the audit results.
+The `.venv` run includes SimBench-dependent tests.
 
-## Audit Runs
+## Latest Audit Runs
+
+Latest generated outputs are under:
+
+- `results/qsts_envelope_2026-05-09/`.
 
 ### Toy Network
 
-The toy network was used to verify that all verdict classes can be produced.
+The toy network remains useful for deterministic smoke tests. It verifies that the
+core decision logic can produce all static verdict classes:
 
-| Case | Result |
+| Case | Expected static result |
 | --- | --- |
 | `toy`, bus 1, 4 MW | `go` |
 | `toy`, bus 1, 5.5 MW, P90 tolerance 1 MW | `go-with-conditions` |
 | `toy`, bus 1, 8 MW, P90 tolerance 1 MW | `no-go` |
-| `toy` screening, 5.5 MW | CSV and Markdown summary generated |
 
-These runs confirm that the current decision logic is internally coherent.
+QSTS intentionally refuses the `toy` network because QSTS requires SimBench-style
+time-series profiles.
 
-### SimBench Network
+### Static SimBench Screening
 
-The SimBench network `1-MV-rural--0-sw` was used for a more realistic screening
-smoke test.
+The SimBench network `1-MV-rural--0-sw` was screened at 5 MW.
 
-At 0.5 MW:
+Output:
 
-- 95 candidate buses were evaluated;
-- all 95 returned `go`;
-- this case is technically useful as a smoke test, but not discriminating enough for
-  product demonstration or research results.
+- `results/qsts_envelope_2026-05-09/screen_5mw/screening.csv`;
+- `results/qsts_envelope_2026-05-09/screen_5mw/screening_summary.md`.
 
-At 5 MW:
+Result:
 
-- 95 candidate buses were evaluated;
-- 44 returned `go`;
-- 14 returned `go-with-conditions`;
-- 37 returned `no-go`.
+The top three static candidates remain buses 2, 3, and 16, each with 5 MW firm and
+conditional capacity in the static screening.
 
-This 5 MW run is the current best audit case because it produces meaningful ranking
-differences and exposes voltage and thermal constraints.
+Frequent static constraints include:
 
-Important generated outputs:
+- high voltage around buses 59, 89, 42, 72, 21, and 14;
+- thermal overload on `line[0] MV1.101 Line 1` for several candidate buses.
 
-- `results/audit_simbench_screen_5mw/screening_summary.md`;
-- `results/audit_simbench_screen_5mw/screening.csv`;
-- `results/audit_simbench_bus21_conditional/memo.md`;
-- `results/audit_simbench_bus24_nogo/memo.md`.
+### QSTS Top-3 Validation
+
+The top 3 screened buses were validated over the first 24 hourly steps with
+baseline-aware QSTS.
+
+Outputs:
+
+- `results/qsts_envelope_2026-05-09/qsts_top3_24h_tol3/qsts_results.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_top3_24h_tol3/qsts_envelope.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_top3_24h_tol3/qsts_envelope_summary.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_top3_24h_tol3/qsts_summary.md`.
+
+Result:
+
+| bus | QSTS P90 tolerance MW | QSTS verdict | QSTS P90 MW | QSTS MWh |
+| ---: | ---: | --- | ---: | ---: |
+| 2 | 3 | `go` | 0.000 | 0.000 |
+| 3 | 3 | `go` | 0.000 | 0.000 |
+| 16 | 3 | `go` | 0.000 | 0.000 |
+
+These top buses remain robust in the first 24-hour QSTS window.
+
+### Representative QSTS Validation
+
+Three representative buses were validated over the first 24 hourly steps:
+
+- bus 2: top static `go`;
+- bus 21: constrained high-voltage bus from the static ranking;
+- bus 24: first static `no-go`.
+
+Outputs:
+
+- `results/qsts_envelope_2026-05-09/qsts_representative_24h_tol3/qsts_results.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_representative_24h_tol3/qsts_envelope.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_representative_24h_tol3/qsts_envelope_summary.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_representative_24h_tol3/qsts_summary.md`.
+
+Result:
+
+| bus | Static verdict | QSTS tolerance MW | QSTS verdict | QSTS P90 MW | QSTS MWh | recurring incremental constraint |
+| ---: | --- | ---: | --- | ---: | ---: | --- |
+| 2 | `go` | 3 | `go` | 0.000 | 0.000 | none |
+| 21 | `no-go` | 3 | `go-with-conditions` | 2.098 | 45.469 | new high voltage at bus 20 |
+| 24 | `no-go` | 3 | `go-with-conditions` | 2.566 | 57.188 | new high voltage at bus 20 |
+
+The QSTS tolerance materially changes the investment conclusion. QSTS now treats
+`go-with-conditions` as a user-defined curtailment appetite, and the exported
+QSTS-derived envelope shows the allowed MW hour by hour.
+
+### Sampled Annual QSTS
+
+A sampled annual run was executed for the top 3 screened buses with
+`--sample-every-n-hours 168`, which evaluates one hourly operating point per week.
+
+Outputs:
+
+- `results/qsts_envelope_2026-05-09/qsts_top3_sample168_tol3/qsts_results.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_top3_sample168_tol3/qsts_envelope.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_top3_sample168_tol3/qsts_envelope_summary.csv`;
+- `results/qsts_envelope_2026-05-09/qsts_top3_sample168_tol3/qsts_summary.md`.
+
+Result:
+
+| bus | evaluated hours | QSTS verdict | QSTS P90 MW | QSTS MWh | violation hours |
+| ---: | ---: | --- | ---: | ---: | ---: |
+| 2 | 53 | `go` | 0.000 | 0.625 | 2 |
+| 3 | 53 | `go` | 0.000 | 0.625 | 2 |
+| 16 | 53 | `go` | 0.000 | 0.156 | 1 |
+
+This run is not a full annual study. It is useful as a reproducible smoke campaign
+showing that the compact envelope summary now groups by real month/hour/direction.
 
 ## Observed Strengths
 
-The MVP is technically healthy and already useful for pre-feasibility screening:
+The current MVP is now stronger than the original static screening prototype:
 
-- tests and lint pass;
-- single-bus assessment and multi-bus screening work through the CLI;
-- SimBench integration works in the virtual environment;
-- the screening becomes informative when the requested MW stresses the network;
-- the memo clearly reports assumptions, constraints, curtailment, economics, and
-  remaining scientific uncertainty;
-- the CSV output is suitable for analysis and ranking.
+- static single-bus assessment and multi-bus screening work through the CLI;
+- screening results are discriminating at 5 MW on the rural MV SimBench network;
+- constraint aggregation now groups recurring constraints by element and metric rather
+  than splitting by exact violation value;
+- QSTS uses SimBench time-series profiles and pandapower power-flow replay;
+- QSTS outputs distinguish raw binding constraints from incremental candidate-caused
+  constraints;
+- pre-existing benchmark-network violations no longer automatically force candidate
+  curtailment;
+- QSTS verdicts now depend on explicit P90 curtailment tolerance;
+- QSTS verdicts can now require both explicit P90 curtailed MW and expected curtailed MWh
+  tolerances;
+- QSTS bounded annual campaigns can use stratified sampling instead of fixed-step weekly
+  sampling, avoiding the artifact where all samples fall in the same time block;
+- QSTS baseline states are cached across buses in a run, reducing repeated no-candidate
+  power-flow work;
+- QSTS runs can be bounded with `--start-hour`, `--duration-hours`, and
+  `--sample-every-n-hours`;
+- QSTS exports `investor_decision.csv` as a compact machine-readable decision table;
+- QSTS exports detailed, compact, and contractual-envelope views;
+- QSTS summaries now include baseline diagnostics, runtime constraint settings, and
+  envelope comparison and investor decision tables.
 
 ## Observed Weaknesses
 
-The main limitations are methodological rather than basic software bugs.
+### QSTS Is Still A Short-Window Validation In The Audit
 
-### Conditional Curtailment Is Still A Proxy
+The latest QSTS audit used a 24-hour window, not the full year. This is enough to
+validate behavior and expose methodological issues, but it is not yet a scientific
+annual result.
 
-When requested MW is above firm capacity, the current custom envelope often curtails
-a constant MW gap across all 8760 hours. This is deterministic and easy to explain,
-but it is not yet a real hourly network simulation.
+### Static And QSTS Curtailment Are Not Equivalent
 
-This is acceptable for MVP pre-feasibility, but too weak for a scientific claim about
-probabilistic or dynamic envelope synthesis.
+The static custom-envelope proxy and the QSTS replay measure different things. Static
+screening is useful for ranking, but QSTS is the higher-evidence validation layer.
 
-### Custom Envelope Is Too Favorable
+For example, bus 21 has static P90 curtailment of 0.273 MW, but QSTS P90 curtailment
+of 2.098 MW in the first 24-hour validation window.
 
-The custom envelope usually wins because it only trims the requested MW down to the
-firm directional limit. This makes it look better than fixed RTE-inspired gabarits,
-but it does not yet prove that this envelope is operationally valid across hourly
-network states.
+### QSTS Runtime Still Needs More Performance Work
 
-QSTS should validate whether a custom envelope remains feasible when load and
-generation profiles vary over time.
+The bounded 24-hour top-3 QSTS runs are manageable, and the sampled annual run is
+usable. Full annual QSTS with binary search per hour, direction, and bus will still
+be expensive. Annual campaigns should use careful `top_n`, time-window controls,
+caching, and possibly parallelization.
 
-### Low-MW Screening Is Not Discriminating
+### The Economic Layer Is Still Proxy-Based
 
-The 0.5 MW SimBench screening returned all buses as `go`. This is useful as a smoke
-test but not useful for demos, ranking, or paper tables.
+The current economic comparison uses configurable proxy values. It is adequate for
+pre-feasibility experiments, but it is not yet a bankable valuation model.
 
-For the current SimBench rural MV network, 5 MW is a better stress-test value.
+### Contractual Envelope Is Conservative But Still V1
 
-### Constraint Aggregation Needs Improvement
+The contractual envelope now compresses QSTS feasible MW into RTE-inspired seasons and
+time blocks using P10 allowed MW. It is more investment-ready than raw hourly rows, but it
+does not yet optimize tariff-like periods, solve an OPF, or validate against operator-grade
+study assumptions.
 
-The screening summary currently aggregates frequent binding constraints by full
-description, including the exact violation value. This splits the same constraint
-into multiple rows when the value changes slightly.
+## Current Interpretation
 
-The aggregation should instead group by:
+The project is now past a simple static hosting-capacity demonstrator. It has a
+working bridge from:
 
-- element type;
-- element id;
-- metric.
+1. static screening;
+2. candidate ranking;
+3. baseline-aware QSTS validation;
+4. user-defined QSTS curtailment tolerance;
+5. revised `go`, `no-go`, or `go-with-conditions` decision;
+6. QSTS-derived hourly, compact, and contractual flexible-envelope exports.
 
-The summary can then report count, max violation, and representative element name.
-
-### Screening Performance Needs Guardrails
-
-The 5 MW SimBench screening over 95 buses took roughly tens of seconds. This is
-acceptable for an audit run, but it will become painful for larger experiments.
-
-Before larger campaigns, the CLI should support:
-
-- limiting the number of evaluated buses;
-- showing progress;
-- optionally caching or parallelizing repeated assessments.
-
-## Why QSTS Is The Right Next Step
-
-QSTS validation is the next best bridge between the product and the scientific paper.
-
-For the product, it makes the memo more credible because curtailment risk is computed
-from hourly operating states rather than a simplified annual proxy.
-
-For the paper, it moves the contribution from static hosting-capacity screening
-toward flexible interconnection envelope validation under time-varying network
-conditions.
-
-OPF or full dynamic operating envelope optimization should come later. QSTS provides
-the baseline needed before optimizing envelopes.
+The most important product/science insight is that the acceptable connection decision
+depends on the investor's tolerance for QSTS P90 curtailed MW and on whether the
+candidate is judged by a static proxy or an hourly QSTS-derived envelope.
 
 ## Recommended Next Implementation Scope
 
-The next implementation should add a QSTS Top-N workflow:
+The next implementation step should harden the new contractual-envelope layer:
 
-1. Run or load a screening result.
-2. Select the top N candidate buses.
-3. Load SimBench time-series profiles for the selected network.
-4. For each selected bus and requested MW, replay hourly operating points.
-5. Add BESS injection and withdrawal scenarios.
-6. Run pandapower power flow per time step.
-7. Record voltage, line, transformer, and convergence violations.
-8. Compute hourly feasible MW, curtailed MW, expected curtailment MWh, P50/P90, and
-   recurring constraints.
-9. Emit:
-   - `qsts_results.csv`;
-   - `qsts_summary.md`;
-   - optional per-bus detail CSVs.
+1. Benchmark contractual-envelope behavior on full annual top-1 and top-3 QSTS runs.
+2. Add sensitivity runs over contractual conservatism, including P10, P25, minimum, and P50
+   allowed MW.
+3. Add annual sensitivity runs over:
+   - requested MW;
+   - QSTS P90 tolerance;
+   - QSTS expected MWh tolerance;
+   - voltage limit;
+   - waiting-cost and curtailment-penalty assumptions.
+4. Add runtime controls:
+   - cache baseline snapshots;
+   - cache profile-loaded networks;
+   - optionally parallelize across buses.
+5. Add stronger validation cases with one clear `go`, one `go-with-conditions`, and
+   one `no-go` under the same tolerance policy.
 
-The first implementation should stay narrow:
+## Immediate Corrections
 
-- BESS only;
-- SimBench only;
-- top N buses only;
-- no OPF yet;
-- no UI;
-- no claim of official grid-study replacement.
+Before larger campaigns, the following corrections should be made:
 
-## Immediate Corrections Before Or During QSTS
-
-The following corrections should be included in or just before the QSTS step:
-
-1. Add `--max-buses` to screening so experiments can be bounded.
-2. Improve frequent-constraint aggregation in screening summaries.
-3. Add timing/progress visibility for screening and QSTS runs.
-4. Make the QSTS output explicit about whether results come from proxy logic or
-   actual hourly power-flow validation.
-5. Document the remaining limits in `docs/assumptions.md` after QSTS is implemented.
+1. Validate whether the default QSTS expected-MWh tolerance should remain 0 MWh or use
+   a product default for pre-feasibility campaigns.
+2. Validate whether P10 allowed MW is the right default contractual value versus minimum
+   or P25 allowed MW.
+3. Cache baseline snapshots; the same baseline is currently recomputed per bus.
+4. Add a result manifest automatically from the CLI instead of maintaining it by hand.
+5. Benchmark a full annual top-1 run before attempting full annual top-10.
 
 ## Current Decision
 
-Proceed next with QSTS validation on top-ranked buses from the 5 MW SimBench
-screening.
+Proceed next with contractual-envelope validation and performance hardening.
 
-This should be treated as the next research/product milestone before any OPF or
-more advanced dynamic operating envelope optimization.
+Do not move to OPF or advanced dynamic operating envelope optimization until the
+QSTS-derived envelope is reproducible, summarized clearly, compared against the
+static proxy and RTE-inspired gabarits, and converted into a compact contract-like
+operating schedule.
