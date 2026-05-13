@@ -1,4 +1,5 @@
 import csv
+import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -306,7 +307,7 @@ def test_cli_qsts_passes_constraint_settings(tmp_path, monkeypatch):
         captured["settings"] = settings
         return QstsResult(request=request, buses=())
 
-    def fake_write_qsts_outputs(_result, output_dir):
+    def fake_write_qsts_outputs(_result, output_dir, command=None):
         output_dir.mkdir(parents=True, exist_ok=True)
         return SimpleNamespace(
             results_csv_path=output_dir / "qsts_results.csv",
@@ -385,6 +386,11 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
 
     assert outputs.results_csv_path.exists()
     assert outputs.summary_path.exists()
+    assert outputs.run_manifest_path.exists()
+    assert outputs.investment_memo_path.exists()
+    assert outputs.performance_json_path.exists()
+    assert outputs.static_vs_qsts_comparison_csv_path.exists()
+    assert outputs.annual_validation_summary_path.exists()
     assert outputs.envelope_csv_path.exists()
     assert outputs.envelope_summary_csv_path.exists()
     assert outputs.contractual_envelope_csv_path.exists()
@@ -420,10 +426,189 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
         contractual_rows = list(csv.DictReader(handle))
     assert contractual_rows[0]["allowed_mw_p10"] == "0.500000"
     assert "curtailed_mw_p90" in contractual_rows[0]
+    assert "allowed_mw_p25" in contractual_rows[0]
+    with outputs.static_vs_qsts_comparison_csv_path.open(newline="", encoding="utf-8") as handle:
+        comparison_rows = list(csv.DictReader(handle))
+    assert comparison_rows[0]["bus_id"] == "1"
+    assert comparison_rows[0]["contractual_allowed_mw_p25_min"] == "0.500000"
+    annual_summary = outputs.annual_validation_summary_path.read_text(encoding="utf-8")
+    assert "Annual Validation Summary" in annual_summary
+    assert "static_vs_qsts_comparison.csv" in annual_summary
     with outputs.investor_decision_csv_path.open(newline="", encoding="utf-8") as handle:
         investor_rows = list(csv.DictReader(handle))
     assert investor_rows[0]["qsts_verdict"] == "go"
     assert investor_rows[0]["qsts_p90_curtailment_mw"] == "0.000000"
+    manifest = outputs.run_manifest_path.read_text(encoding="utf-8")
+    assert '"schema_version": "qsts-run-manifest-v1"' in manifest
+    assert '"network_code": "1-MV-rural--0-sw"' in manifest
+    assert '"contractual_envelope.csv"' in manifest
+    assert '"qsts_performance.json"' in manifest
+    performance = json.loads(outputs.performance_json_path.read_text(encoding="utf-8"))
+    assert performance["evaluated_buses"] == 1
+    assert performance["evaluated_time_steps"] == 2
+    assert performance["baseline_power_flow_calls"] == 2
+    assert performance["candidate_power_flow_calls"] == 4
+    assert performance["power_flow_calls"] == 6
+    memo = outputs.investment_memo_path.read_text(encoding="utf-8")
+    assert "# QSTS BESS Investment Memo" in memo
+    assert "Primary Recommendation" in memo
+    assert "Economics Proxy" in memo
+    assert "delta_npv_eur" in memo
+    assert "Contractual Envelope Summary" in memo
+    assert "| 1 | 1 | go | 1.000 | 1.000 | 0.500 | 0.500 | 0.000 | 0.000 | - |" in memo
+
+
+def test_qsts_request_rejects_negative_economic_inputs(tmp_path):
+    with pytest.raises(ValueError, match="storage_duration_hours"):
+        QstsRequest(
+            network_code="1-MV-rural--0-sw",
+            screening_csv=tmp_path / "screening.csv",
+            requested_mw=1.0,
+            storage_duration_hours=-1.0,
+        )
+    with pytest.raises(ValueError, match="discount_rate"):
+        QstsRequest(
+            network_code="1-MV-rural--0-sw",
+            screening_csv=tmp_path / "screening.csv",
+            requested_mw=1.0,
+            discount_rate=-0.1,
+        )
+
+
+def test_cli_qsts_manifest_records_invocation(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run_qsts(request, settings=None):
+        captured["request"] = request
+        return QstsResult(request=request, buses=())
+
+    monkeypatch.setattr("thesegrid.cli.run_qsts", fake_run_qsts)
+
+    output_dir = tmp_path / "out"
+    exit_code = main(
+        [
+            "qsts",
+            "--network",
+            "1-MV-rural--0-sw",
+            "--screening-csv",
+            str(tmp_path / "screening.csv"),
+            "--requested-mw",
+            "0.5",
+            "--output",
+            str(output_dir),
+        ]
+    )
+
+    assert exit_code == 0
+    manifest = (output_dir / "run_manifest.json").read_text(encoding="utf-8")
+    assert '"command": [' in manifest
+    assert '"qsts"' in manifest
+    assert '"--requested-mw"' in manifest
+    assert '"0.5"' in manifest
+    assert captured["request"].requested_mw == 0.5
+
+
+def test_cli_qsts_accepts_progress_and_economics_options(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_run_qsts(request, settings=None):
+        captured["request"] = request
+        return QstsResult(request=request, buses=())
+
+    monkeypatch.setattr("thesegrid.cli.run_qsts", fake_run_qsts)
+
+    exit_code = main(
+        [
+            "qsts",
+            "--network",
+            "1-MV-rural--0-sw",
+            "--screening-csv",
+            str(tmp_path / "screening.csv"),
+            "--requested-mw",
+            "0.5",
+            "--progress-every-n-hours",
+            "250",
+            "--storage-duration-hours",
+            "4",
+            "--capex-eur-per-kw",
+            "250000",
+            "--fixed-opex-eur-per-kw-year",
+            "7000",
+            "--gross-revenue-eur-per-mw-year",
+            "120000",
+            "--curtailment-penalty-eur-per-mwh",
+            "150",
+            "--reinforcement-wait-years",
+            "6",
+            "--discount-rate",
+            "0.08",
+            "--output",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    request = captured["request"]
+    assert request.progress_every_n_hours == 250
+    assert request.storage_duration_hours == 4.0
+    assert request.capex_eur_per_kw == 250000.0
+    assert request.fixed_opex_eur_per_kw_year == 7000.0
+    assert request.gross_revenue_eur_per_mw_year == 120000.0
+    assert request.curtailment_penalty_eur_per_mwh == 150.0
+    assert request.reinforcement_wait_years == 6.0
+    assert request.discount_rate == 0.08
+
+
+def test_cli_qsts_sweep_writes_scenario_outputs_and_summary(tmp_path, monkeypatch):
+    screening_csv = tmp_path / "screening.csv"
+    _write_screening_csv(
+        screening_csv,
+        [
+            {"rank": "1", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+        ],
+    )
+    config = tmp_path / "sweep.json"
+    config.write_text(
+        json.dumps(
+            {
+                "network_code": "1-MV-rural--0-sw",
+                "screening_csv": str(screening_csv),
+                "top_n": 1,
+                "requested_mw": [0.5, 0.75],
+                "p90_curtailment_tolerance_mw": [0.0],
+                "expected_curtailment_tolerance_mwh": [0.0],
+                "voltage_max_pu": [1.05],
+                "sampling": "stratified",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run_qsts(request, settings=None):
+        return _sample_qsts_result_for_request(request, verdict="go")
+
+    monkeypatch.setattr("thesegrid.cli.run_qsts", fake_run_qsts)
+
+    output = tmp_path / "sweep"
+    exit_code = main(["qsts-sweep", "--config", str(config), "--output", str(output)])
+
+    assert exit_code == 0
+    assert (output / "sensitivity_results.csv").exists()
+    assert (output / "sensitivity_summary.md").exists()
+    assert (output / "sweep_manifest.json").exists()
+    rows = list(csv.DictReader((output / "sensitivity_results.csv").open(encoding="utf-8")))
+    assert [row["scenario_id"] for row in rows] == ["scenario_001", "scenario_002"]
+    assert {row["requested_mw"] for row in rows} == {"0.500000", "0.750000"}
+    assert (output / "scenario_001" / "qsts_performance.json").exists()
+
+
+def test_cli_qsts_sweep_rejects_invalid_config(tmp_path):
+    config = tmp_path / "sweep.json"
+    config.write_text('{"network_code": "1-MV-rural--0-sw"}', encoding="utf-8")
+
+    exit_code = main(["qsts-sweep", "--config", str(config), "--output", str(tmp_path / "out")])
+
+    assert exit_code == 2
 
 
 def test_run_qsts_can_limit_time_window(tmp_path, monkeypatch):
@@ -526,9 +711,9 @@ def test_run_qsts_reuses_baseline_state_across_buses(tmp_path, monkeypatch):
     calls = []
     real_baseline_state = __import__("thesegrid.qsts", fromlist=["_baseline_state"])._baseline_state
 
-    def counting_baseline_state(net, bus_id, settings):
+    def counting_baseline_state(net, bus_id, settings, tracker=None):
         calls.append(bus_id)
-        return real_baseline_state(net, bus_id, settings)
+        return real_baseline_state(net, bus_id, settings, tracker)
 
     monkeypatch.setattr("thesegrid.qsts.load_network", lambda _network_code: net)
     monkeypatch.setattr("thesegrid.qsts.load_simbench_power_profiles", lambda _net: profiles)
@@ -613,6 +798,43 @@ def _sample_qsts_result(tmp_path):
         ),
         main_recurring_constraint="line[1] line.loading_percent: count=1",
         hourly_records=records,
+    )
+    return QstsResult(request=request, buses=(bus,))
+
+
+def _sample_qsts_result_for_request(request, verdict):
+    record = QstsHourlyRecord(
+        timestamp="2026-01-01T00:00:00",
+        direction="injection",
+        requested_mw=request.requested_mw,
+        feasible_mw=request.requested_mw,
+        curtailed_mw=0.0,
+        converged=True,
+        min_vm_pu=0.98,
+        max_vm_pu=1.02,
+        max_loading_percent=70.0,
+        binding_constraint="",
+        incremental_binding_constraint="",
+    )
+    bus = QstsBusResult(
+        rank=1,
+        bus_id=1,
+        bus_name="bus-1",
+        qsts_verdict=verdict,
+        requested_mw=request.requested_mw,
+        static_firm_capacity_mw=request.requested_mw,
+        static_conditional_capacity_mw=request.requested_mw,
+        p90_curtailment_tolerance_mw=request.p90_curtailment_tolerance_mw,
+        feasible_hours=1,
+        violation_hours=0,
+        curtailment=CurtailmentEstimate(
+            expected_hours=0,
+            expected_mwh=0.0,
+            p50_mw=0.0,
+            p90_mw=0.0,
+        ),
+        main_recurring_constraint="",
+        hourly_records=(record,),
     )
     return QstsResult(request=request, buses=(bus,))
 

@@ -35,6 +35,12 @@ The MVP can now:
 - export a compact month/hour/direction envelope in `qsts_envelope_summary.csv`;
 - export an investor-facing contractual envelope in `contractual_envelope.csv`, grouped by
   direction, RTE-inspired V1 season, and fixed time block;
+- export a QSTS investor memo in `investment_memo.md`;
+- export a reproducibility manifest in `run_manifest.json`;
+- export QSTS runtime and power-flow counters in `qsts_performance.json`;
+- export static-vs-QSTS comparison metrics in `static_vs_qsts_comparison.csv`;
+- export `annual_validation_summary.md` for full-year or sampled-annual bundles;
+- run QSTS sensitivity sweeps with `thesegrid qsts-sweep`;
 - compare firm-only, static custom, RTE-inspired, and QSTS-derived envelopes in
   `qsts_summary.md`;
 - record QSTS baseline diagnostics and runtime constraint settings.
@@ -44,7 +50,8 @@ The main user-facing commands are:
 ```bash
 thesegrid assess --network <network_code> --bus <bus_id> --requested-mw <mw> --output <memo_path>
 thesegrid screen --network <network_code> --requested-mw <mw> --output <output_dir>
-thesegrid qsts --network <network_code> --screening-csv <screening_csv> --requested-mw <mw> --top-n <n> --start-hour <h> --duration-hours <h> --sample-every-n-hours <n> --stratified-sample --voltage-min-pu <pu> --voltage-max-pu <pu> --max-loading-percent <percent> --p90-curtailment-tolerance-mw <mw> --expected-curtailment-tolerance-mwh <mwh> --output <output_dir>
+thesegrid qsts --network <network_code> --screening-csv <screening_csv> --requested-mw <mw> --top-n <n> --start-hour <h> --duration-hours <h> --sample-every-n-hours <n> --stratified-sample --voltage-min-pu <pu> --voltage-max-pu <pu> --max-loading-percent <percent> --p90-curtailment-tolerance-mw <mw> --expected-curtailment-tolerance-mwh <mwh> --progress-every-n-hours <n> --storage-duration-hours <h> --capex-eur-per-kw <eur> --fixed-opex-eur-per-kw-year <eur> --gross-revenue-eur-per-mw-year <eur> --curtailment-penalty-eur-per-mwh <eur> --reinforcement-wait-years <years> --discount-rate <rate> --output <output_dir>
+thesegrid qsts-sweep --config <sweep_json> --output <output_dir>
 ```
 
 ## Verification Performed
@@ -192,6 +199,14 @@ The current MVP is now stronger than the original static screening prototype:
   `--sample-every-n-hours`;
 - QSTS exports `investor_decision.csv` as a compact machine-readable decision table;
 - QSTS exports detailed, compact, and contractual-envelope views;
+- QSTS exports an investor-facing Markdown memo separate from the technical summary;
+- QSTS records a run manifest with request, settings, generated outputs, environment, and
+  git metadata;
+- QSTS records performance counters and uses an in-place QSTS candidate evaluator to avoid
+  repeated full network deep-copies during hourly candidate dispatch checks;
+- QSTS investor memos now include a simple, explicit economics proxy;
+- QSTS sweep runs aggregate sensitivity scenarios while preserving each scenario's full
+  output bundle;
 - QSTS summaries now include baseline diagnostics, runtime constraint settings, and
   envelope comparison and investor decision tables.
 
@@ -274,9 +289,10 @@ Before larger campaigns, the following corrections should be made:
    a product default for pre-feasibility campaigns.
 2. Validate whether P10 allowed MW is the right default contractual value versus minimum
    or P25 allowed MW.
-3. Cache baseline snapshots; the same baseline is currently recomputed per bus.
-4. Add a result manifest automatically from the CLI instead of maintaining it by hand.
-5. Benchmark a full annual top-1 run before attempting full annual top-10.
+3. Benchmark whether the QSTS investor memo is sufficient for a first external demo.
+4. Benchmark a full annual top-1 run before attempting full annual top-10.
+5. Use `qsts_performance.json` to decide whether the next optimization should be
+   pandapower recycling, parallelization, or a compiled backend investigation.
 
 ## Current Decision
 

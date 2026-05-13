@@ -1,14 +1,20 @@
 from __future__ import annotations
 
 import csv
+import json
+import platform
+import subprocess
+import sys
+import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import pandas as pd
 
-from thesegrid.capacity import evaluate_dispatch, find_max_feasible
+from thesegrid.capacity import DispatchEvaluation, evaluate_dispatch
 from thesegrid.contractual import (
     ContractualEnvelopeRow,
     synthesize_contractual_envelope,
@@ -97,10 +103,27 @@ CONTRACTUAL_ENVELOPE_COLUMNS = (
     "season",
     "time_block",
     "allowed_mw_p10",
+    "allowed_mw_p25",
     "allowed_mw_p50",
     "allowed_mw_min",
     "curtailed_mw_p90",
     "dominant_incremental_constraint",
+)
+
+STATIC_VS_QSTS_COMPARISON_COLUMNS = (
+    "bus_id",
+    "bus_name",
+    "qsts_verdict",
+    "static_firm_capacity_mw",
+    "static_conditional_capacity_mw",
+    "contractual_allowed_mw_p10_min",
+    "contractual_allowed_mw_p25_min",
+    "contractual_allowed_mw_p50_min",
+    "contractual_allowed_mw_min",
+    "qsts_p90_curtailment_mw",
+    "qsts_expected_curtailment_mwh",
+    "main_recurring_constraint",
+    "runtime_seconds",
 )
 
 
@@ -116,8 +139,16 @@ class QstsRequest:
     duration_hours: int | None = None
     sample_every_n_hours: int = 1
     stratified_sample: bool = False
+    progress_every_n_hours: int = 0
     p90_curtailment_tolerance_mw: float = 0.0
     expected_curtailment_tolerance_mwh: float = 0.0
+    storage_duration_hours: float = 4.0
+    capex_eur_per_kw: float = 0.0
+    fixed_opex_eur_per_kw_year: float = 0.0
+    gross_revenue_eur_per_mw_year: float = 0.0
+    curtailment_penalty_eur_per_mwh: float = 100.0
+    reinforcement_wait_years: float = 5.0
+    discount_rate: float = 0.08
 
     def __post_init__(self) -> None:
         if not self.network_code:
@@ -138,10 +169,26 @@ class QstsRequest:
             raise ValueError("duration_hours must be positive when provided")
         if self.sample_every_n_hours <= 0:
             raise ValueError("sample_every_n_hours must be positive")
+        if self.progress_every_n_hours < 0:
+            raise ValueError("progress_every_n_hours must be non-negative")
         if self.p90_curtailment_tolerance_mw < 0:
             raise ValueError("p90_curtailment_tolerance_mw must be non-negative")
         if self.expected_curtailment_tolerance_mwh < 0:
             raise ValueError("expected_curtailment_tolerance_mwh must be non-negative")
+        if self.storage_duration_hours < 0:
+            raise ValueError("storage_duration_hours must be non-negative")
+        if self.capex_eur_per_kw < 0:
+            raise ValueError("capex_eur_per_kw must be non-negative")
+        if self.fixed_opex_eur_per_kw_year < 0:
+            raise ValueError("fixed_opex_eur_per_kw_year must be non-negative")
+        if self.gross_revenue_eur_per_mw_year < 0:
+            raise ValueError("gross_revenue_eur_per_mw_year must be non-negative")
+        if self.curtailment_penalty_eur_per_mwh < 0:
+            raise ValueError("curtailment_penalty_eur_per_mwh must be non-negative")
+        if self.reinforcement_wait_years < 0:
+            raise ValueError("reinforcement_wait_years must be non-negative")
+        if self.discount_rate < 0:
+            raise ValueError("discount_rate must be non-negative")
 
 
 @dataclass(frozen=True)
@@ -230,17 +277,50 @@ class QstsEnvelopeComparison:
 
 
 @dataclass(frozen=True)
+class QstsPerformanceStats:
+    runtime_seconds: float = 0.0
+    power_flow_calls: int = 0
+    baseline_power_flow_calls: int = 0
+    candidate_power_flow_calls: int = 0
+    binary_search_count: int = 0
+    baseline_cache_hits: int = 0
+    baseline_cache_misses: int = 0
+    evaluated_time_steps: int = 0
+    evaluated_buses: int = 0
+
+
+@dataclass(frozen=True)
+class QstsEconomicsProxy:
+    storage_duration_hours: float
+    energy_capacity_mwh: float
+    capex_eur: float
+    annual_gross_revenue_eur: float
+    annual_curtailment_loss_eur: float
+    annual_fixed_opex_eur: float
+    annual_ebitda_proxy_eur: float
+    connect_now_value_eur: float
+    wait_value_eur: float
+    delta_npv_eur: float
+
+
+@dataclass(frozen=True)
 class QstsResult:
     request: QstsRequest
     buses: tuple[QstsBusResult, ...]
     source: str = "actual hourly power-flow validation"
     settings: ConstraintSettings = field(default_factory=ConstraintSettings)
+    performance: QstsPerformanceStats = field(default_factory=QstsPerformanceStats)
 
 
 @dataclass(frozen=True)
 class QstsOutputPaths:
     results_csv_path: Path
     summary_path: Path
+    run_manifest_path: Path
+    investment_memo_path: Path
+    performance_json_path: Path
+    static_vs_qsts_comparison_csv_path: Path
+    annual_validation_summary_path: Path
     investor_decision_csv_path: Path
     envelope_csv_path: Path
     envelope_summary_csv_path: Path
@@ -322,6 +402,7 @@ def run_qsts(
     net: object | None = None,
     settings: ConstraintSettings | None = None,
 ) -> QstsResult:
+    started = time.perf_counter()
     settings = settings or ConstraintSettings()
     network = load_network(request.network_code) if net is None else net
     if isinstance(network, ToyNetwork) and request.network_code == "toy":
@@ -339,28 +420,49 @@ def run_qsts(
         raise ValueError("QSTS requires at least one profile time step")
 
     baseline_cache: dict[int, _BaselineState] = {}
-    bus_results = tuple(
-        _run_qsts_for_bus(
-            network,
-            selected,
-            requested_mw=request.requested_mw,
-            profiles=profiles,
-            time_steps=time_steps,
-            settings=settings,
-            tolerance_mw=request.tolerance_mw,
-            p90_curtailment_tolerance_mw=request.p90_curtailment_tolerance_mw,
-            expected_curtailment_tolerance_mwh=request.expected_curtailment_tolerance_mwh,
-            baseline_cache=baseline_cache,
-        )
-        for selected in selected_buses
+    tracker = _QstsPerformanceTracker(
+        total_buses=len(selected_buses),
+        total_time_steps=len(time_steps),
+        progress_every_n_hours=request.progress_every_n_hours,
     )
-    return QstsResult(request=request, buses=bus_results, settings=settings)
+    bus_results: list[QstsBusResult] = []
+    for selected in selected_buses:
+        bus_results.append(
+            _run_qsts_for_bus(
+                network,
+                selected,
+                requested_mw=request.requested_mw,
+                profiles=profiles,
+                time_steps=time_steps,
+                settings=settings,
+                tolerance_mw=request.tolerance_mw,
+                p90_curtailment_tolerance_mw=request.p90_curtailment_tolerance_mw,
+                expected_curtailment_tolerance_mwh=request.expected_curtailment_tolerance_mwh,
+                baseline_cache=baseline_cache,
+                tracker=tracker,
+            )
+        )
+    return QstsResult(
+        request=request,
+        buses=tuple(bus_results),
+        settings=settings,
+        performance=tracker.to_stats(time.perf_counter() - started),
+    )
 
 
-def write_qsts_outputs(result: QstsResult, output_dir: Path) -> QstsOutputPaths:
+def write_qsts_outputs(
+    result: QstsResult,
+    output_dir: Path,
+    command: Sequence[str] | None = None,
+) -> QstsOutputPaths:
     output_dir.mkdir(parents=True, exist_ok=True)
     results_csv = output_dir / "qsts_results.csv"
     summary_path = output_dir / "qsts_summary.md"
+    run_manifest_path = output_dir / "run_manifest.json"
+    investment_memo_path = output_dir / "investment_memo.md"
+    performance_json_path = output_dir / "qsts_performance.json"
+    static_vs_qsts_comparison_csv = output_dir / "static_vs_qsts_comparison.csv"
+    annual_validation_summary_path = output_dir / "annual_validation_summary.md"
     investor_decision_csv = output_dir / "investor_decision.csv"
     envelope_csv = output_dir / "qsts_envelope.csv"
     envelope_summary_csv = output_dir / "qsts_envelope_summary.csv"
@@ -408,10 +510,49 @@ def write_qsts_outputs(result: QstsResult, output_dir: Path) -> QstsOutputPaths:
         for row in contractual.rows:
             writer.writerow(_contractual_envelope_row(row))
 
+    with static_vs_qsts_comparison_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=STATIC_VS_QSTS_COMPARISON_COLUMNS)
+        writer.writeheader()
+        for row in _static_vs_qsts_comparison_rows(result, contractual.rows):
+            writer.writerow(row)
+
     summary_path.write_text(render_qsts_summary(result), encoding="utf-8")
+    investment_memo_path.write_text(render_qsts_investment_memo(result), encoding="utf-8")
+    annual_validation_summary_path.write_text(
+        render_annual_validation_summary(result),
+        encoding="utf-8",
+    )
+    performance_json_path.write_text(
+        json.dumps(_json_ready(asdict(result.performance)), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    _write_run_manifest(
+        result=result,
+        output_dir=output_dir,
+        output_paths={
+            "qsts_results": results_csv,
+            "qsts_summary": summary_path,
+            "investment_memo": investment_memo_path,
+            "qsts_performance": performance_json_path,
+            "static_vs_qsts_comparison": static_vs_qsts_comparison_csv,
+            "annual_validation_summary": annual_validation_summary_path,
+            "investor_decision": investor_decision_csv,
+            "qsts_envelope": envelope_csv,
+            "qsts_envelope_summary": envelope_summary_csv,
+            "contractual_envelope": contractual_envelope_csv,
+            "bus_details": detail_paths,
+        },
+        manifest_path=run_manifest_path,
+        command=command,
+    )
     return QstsOutputPaths(
         results_csv_path=results_csv,
         summary_path=summary_path,
+        run_manifest_path=run_manifest_path,
+        investment_memo_path=investment_memo_path,
+        performance_json_path=performance_json_path,
+        static_vs_qsts_comparison_csv_path=static_vs_qsts_comparison_csv,
+        annual_validation_summary_path=annual_validation_summary_path,
         investor_decision_csv_path=investor_decision_csv,
         envelope_csv_path=envelope_csv,
         envelope_summary_csv_path=envelope_summary_csv,
@@ -549,6 +690,101 @@ This report is based on {result.source}. It remains an early-stage buyer-side de
 """
 
 
+def render_qsts_investment_memo(result: QstsResult) -> str:
+    if not result.buses:
+        primary = "No candidate bus was selected for QSTS validation."
+        investor_table = "No investor decision rows available."
+        contractual_summary = "No contractual envelope rows available."
+        contractual_detail = "No contractual envelope rows available."
+    else:
+        top_bus = result.buses[0]
+        primary = (
+            f"Bus {top_bus.bus_id} ({top_bus.bus_name or 'unnamed'}) is the top-ranked "
+            f"QSTS candidate with verdict `{top_bus.qsts_verdict}` at "
+            f"{top_bus.requested_mw:.3f} MW."
+        )
+        contractual_rows = synthesize_contractual_envelope(qsts_envelope_records(result)).rows
+        investor_table = _render_qsts_investment_table(result.buses, contractual_rows)
+        contractual_summary = _render_contractual_summary_table(contractual_rows)
+        contractual_detail = _render_contractual_envelope_table(contractual_rows)
+    economics = _qsts_economics_proxy(result)
+    return f"""# QSTS BESS Investment Memo
+
+This memo is an early-stage buyer-side decision aid for BESS flexible connection pre-feasibility. It does not replace an official grid-connection study.
+
+## Primary Recommendation
+
+{primary}
+
+## Request
+
+- network_code: {result.request.network_code}
+- requested_mw: {result.request.requested_mw:.3f}
+- screening_csv: {result.request.screening_csv}
+- evaluated_buses: {len(result.buses)}
+- baseline_mode: pre-existing violations ignored unless worsened by candidate
+- qsts_p90_tolerance_mw: {result.request.p90_curtailment_tolerance_mw:.3f}
+- qsts_expected_curtailment_tolerance_mwh: {result.request.expected_curtailment_tolerance_mwh:.3f}
+
+## Investor Decision
+
+{investor_table}
+
+## Contractual Envelope Summary
+
+{contractual_summary}
+
+## Contractual Envelope Detail
+
+{contractual_detail}
+
+## Economics Proxy
+
+- storage_duration_hours: {economics.storage_duration_hours:.3f}
+- energy_capacity_mwh: {economics.energy_capacity_mwh:.3f}
+- capex_eur: {economics.capex_eur:.2f}
+- annual_gross_revenue_eur: {economics.annual_gross_revenue_eur:.2f}
+- annual_curtailment_loss_eur: {economics.annual_curtailment_loss_eur:.2f}
+- annual_fixed_opex_eur: {economics.annual_fixed_opex_eur:.2f}
+- annual_ebitda_proxy_eur: {economics.annual_ebitda_proxy_eur:.2f}
+- connect_now_value_eur: {economics.connect_now_value_eur:.2f}
+- wait_value_eur: {economics.wait_value_eur:.2f}
+- delta_npv_eur: {economics.delta_npv_eur:.2f}
+
+## Interpretation
+
+- Static screening is a proxy ranking layer; QSTS is the hourly power-flow validation layer.
+- The contractual envelope is synthesized from QSTS allowed MW by direction, V1 season, and fixed time block.
+- `contract_p10_min_mw` is the tightest conservative contractual MW across the synthesized blocks for a bus.
+- Remaining exclusions: short-circuit, protection, dynamic stability, N-1 security, harmonics, and official operator planning criteria.
+"""
+
+
+def render_annual_validation_summary(result: QstsResult) -> str:
+    return f"""# Annual Validation Summary
+
+This file summarizes the QSTS validation bundle. It can be used for full-year or sampled annual campaigns; check `run_manifest.json` for the exact sampling mode and duration.
+
+## Runtime
+
+- runtime_seconds: {result.performance.runtime_seconds:.3f}
+- power_flow_calls: {result.performance.power_flow_calls}
+- baseline_power_flow_calls: {result.performance.baseline_power_flow_calls}
+- candidate_power_flow_calls: {result.performance.candidate_power_flow_calls}
+- binary_search_count: {result.performance.binary_search_count}
+- evaluated_time_steps: {result.performance.evaluated_time_steps}
+- evaluated_buses: {result.performance.evaluated_buses}
+
+## Bundle
+
+- static_vs_qsts_comparison.csv
+- qsts_performance.json
+- contractual_envelope.csv
+- qsts_results.csv
+- run_manifest.json
+"""
+
+
 def _run_qsts_for_bus(
     net: object,
     selected: QstsSelectedBus,
@@ -560,6 +796,7 @@ def _run_qsts_for_bus(
     p90_curtailment_tolerance_mw: float,
     expected_curtailment_tolerance_mwh: float,
     baseline_cache: dict[int, _BaselineState] | None = None,
+    tracker: _QstsPerformanceTracker | None = None,
 ) -> QstsBusResult:
     records: list[QstsHourlyRecord] = []
     constraint_counts: dict[str, int] = {}
@@ -569,71 +806,76 @@ def _run_qsts_for_bus(
     baseline_max_loading_percent: float | None = None
     timestamps = _timestamps_for_steps(time_steps)
     baseline_cache = baseline_cache if baseline_cache is not None else {}
+    tracker = tracker if tracker is not None else _QstsPerformanceTracker()
+    tracker.evaluated_buses += 1
 
-    for position, time_step in enumerate(time_steps):
-        _apply_profiles(net, profiles, time_step)
-        if time_step not in baseline_cache:
-            baseline_cache[time_step] = _baseline_state(net, selected.bus_id, settings)
-        baseline_state = baseline_cache[time_step]
-        baseline = baseline_state.violations
-        if baseline:
-            baseline_violating_hours += 1
-            if baseline_state.binding_constraint:
-                baseline_constraint_counts[baseline_state.binding_constraint] = (
-                    baseline_constraint_counts.get(baseline_state.binding_constraint, 0) + 1
-                )
-        baseline_max_vm_pu = _max_optional(baseline_max_vm_pu, baseline_state.max_vm_pu)
-        baseline_max_loading_percent = _max_optional(
-            baseline_max_loading_percent,
-            baseline_state.max_loading_percent,
-        )
-        timestamp = timestamps[position]
-        for direction in ("injection", "withdrawal"):
-            requested = _evaluate_incremental_dispatch(
-                net,
-                selected.bus_id,
-                direction,
-                requested_mw,
-                settings,
-                baseline,
-            )
-            if requested.incrementally_feasible:
-                feasible_mw = requested_mw
-                incremental_violations = requested.incremental_violations
+    with _QstsDispatchEvaluator(net, selected.bus_id, settings, tracker) as evaluator:
+        for position, time_step in enumerate(time_steps):
+            _apply_profiles(net, profiles, time_step)
+            evaluator.reset_candidate()
+            if time_step not in baseline_cache:
+                tracker.baseline_cache_misses += 1
+                baseline_cache[time_step] = _baseline_state(net, selected.bus_id, settings, tracker)
             else:
-                feasible_mw = find_max_feasible(
-                    upper_mw=requested_mw,
-                    is_feasible=lambda mw, direction=direction: _evaluate_incremental_dispatch(
-                        net,
-                        selected.bus_id,
-                        direction,
-                        mw,
-                        settings,
-                        baseline,
-                    ).incrementally_feasible,
-                    tolerance_mw=tolerance_mw,
-                )
-                incremental_violations = requested.incremental_violations
-                if incremental_violations:
-                    description = incremental_violations[0]
-                    constraint_counts[description] = constraint_counts.get(description, 0) + 1
-            records.append(
-                QstsHourlyRecord(
-                    timestamp=str(timestamp),
-                    direction=direction,
-                    requested_mw=round(requested_mw, 6),
-                    feasible_mw=round(feasible_mw, 6),
-                    curtailed_mw=round(max(0.0, requested_mw - feasible_mw), 6),
-                    converged=requested.converged,
-                    min_vm_pu=requested.min_vm_pu,
-                    max_vm_pu=requested.max_vm_pu,
-                    max_loading_percent=requested.max_loading_percent,
-                    binding_constraint=requested.binding_constraint,
-                    incremental_binding_constraint=(
-                        incremental_violations[0] if incremental_violations else ""
-                    ),
-                )
+                tracker.baseline_cache_hits += 1
+            baseline_state = baseline_cache[time_step]
+            baseline = baseline_state.violations
+            if baseline:
+                baseline_violating_hours += 1
+                if baseline_state.binding_constraint:
+                    baseline_constraint_counts[baseline_state.binding_constraint] = (
+                        baseline_constraint_counts.get(baseline_state.binding_constraint, 0) + 1
+                    )
+            baseline_max_vm_pu = _max_optional(baseline_max_vm_pu, baseline_state.max_vm_pu)
+            baseline_max_loading_percent = _max_optional(
+                baseline_max_loading_percent,
+                baseline_state.max_loading_percent,
             )
+            timestamp = timestamps[position]
+            for direction in ("injection", "withdrawal"):
+                requested = _evaluate_incremental_dispatch(
+                    evaluator,
+                    direction,
+                    requested_mw,
+                    baseline,
+                )
+                if requested.incrementally_feasible:
+                    feasible_mw = requested_mw
+                    incremental_violations = requested.incremental_violations
+                else:
+                    tracker.binary_search_count += 1
+                    feasible_mw = _find_max_feasible_with_infeasible_high(
+                        upper_mw=requested_mw,
+                        is_feasible=lambda mw, direction=direction: _evaluate_incremental_dispatch(
+                            evaluator,
+                            direction,
+                            mw,
+                            baseline,
+                        ).incrementally_feasible,
+                        tolerance_mw=tolerance_mw,
+                    )
+                    incremental_violations = requested.incremental_violations
+                    if incremental_violations:
+                        description = incremental_violations[0]
+                        constraint_counts[description] = constraint_counts.get(description, 0) + 1
+                records.append(
+                    QstsHourlyRecord(
+                        timestamp=str(timestamp),
+                        direction=direction,
+                        requested_mw=round(requested_mw, 6),
+                        feasible_mw=round(feasible_mw, 6),
+                        curtailed_mw=round(max(0.0, requested_mw - feasible_mw), 6),
+                        converged=requested.converged,
+                        min_vm_pu=requested.min_vm_pu,
+                        max_vm_pu=requested.max_vm_pu,
+                        max_loading_percent=requested.max_loading_percent,
+                        binding_constraint=requested.binding_constraint,
+                        incremental_binding_constraint=(
+                            incremental_violations[0] if incremental_violations else ""
+                        ),
+                    )
+                )
+            tracker.record_time_step()
 
     hourly_frame = pd.DataFrame(asdict(record) for record in records)
     curtailment = qsts_curtailment_estimate(hourly_frame)
@@ -786,11 +1028,163 @@ class _BaselineState:
     converged: bool
 
 
+class _QstsPerformanceTracker:
+    def __init__(
+        self,
+        total_buses: int = 0,
+        total_time_steps: int = 0,
+        progress_every_n_hours: int = 0,
+    ) -> None:
+        self.total_buses = total_buses
+        self.total_time_steps = total_time_steps
+        self.progress_every_n_hours = progress_every_n_hours
+        self.power_flow_calls = 0
+        self.baseline_power_flow_calls = 0
+        self.candidate_power_flow_calls = 0
+        self.binary_search_count = 0
+        self.baseline_cache_hits = 0
+        self.baseline_cache_misses = 0
+        self.evaluated_time_steps = 0
+        self.evaluated_buses = 0
+
+    def record_baseline_power_flow(self) -> None:
+        self.power_flow_calls += 1
+        self.baseline_power_flow_calls += 1
+
+    def record_candidate_power_flow(self) -> None:
+        self.power_flow_calls += 1
+        self.candidate_power_flow_calls += 1
+
+    def record_time_step(self) -> None:
+        self.evaluated_time_steps += 1
+        if (
+            self.progress_every_n_hours > 0
+            and self.evaluated_time_steps % self.progress_every_n_hours == 0
+        ):
+            total = self.total_buses * self.total_time_steps
+            print(
+                f"qsts progress: {self.evaluated_time_steps}/{total} bus-hours evaluated",
+                file=sys.stderr,
+            )
+
+    def to_stats(self, runtime_seconds: float) -> QstsPerformanceStats:
+        return QstsPerformanceStats(
+            runtime_seconds=round(runtime_seconds, 6),
+            power_flow_calls=self.power_flow_calls,
+            baseline_power_flow_calls=self.baseline_power_flow_calls,
+            candidate_power_flow_calls=self.candidate_power_flow_calls,
+            binary_search_count=self.binary_search_count,
+            baseline_cache_hits=self.baseline_cache_hits,
+            baseline_cache_misses=self.baseline_cache_misses,
+            evaluated_time_steps=self.evaluated_time_steps,
+            evaluated_buses=self.evaluated_buses,
+        )
+
+
+class _QstsDispatchEvaluator:
+    def __init__(
+        self,
+        net: object,
+        bus_id: int,
+        settings: ConstraintSettings,
+        tracker: _QstsPerformanceTracker,
+    ) -> None:
+        self.net = net
+        self.bus_id = bus_id
+        self.settings = settings
+        self.tracker = tracker
+        self._sgen_id: int | None = None
+        self._load_id: int | None = None
+
+    def __enter__(self) -> _QstsDispatchEvaluator:
+        if isinstance(self.net, ToyNetwork):
+            return self
+        import pandapower as pp
+
+        self._sgen_id = int(
+            pp.create_sgen(
+                self.net,
+                bus=self.bus_id,
+                p_mw=0.0,
+                q_mvar=0.0,
+                name="candidate_bess_injection_qsts",
+            )
+        )
+        self._load_id = int(
+            pp.create_load(
+                self.net,
+                bus=self.bus_id,
+                p_mw=0.0,
+                q_mvar=0.0,
+                name="candidate_bess_withdrawal_qsts",
+            )
+        )
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        if isinstance(self.net, ToyNetwork):
+            return
+        if self._sgen_id is not None and self._sgen_id in self.net.sgen.index:
+            self.net.sgen.drop(index=self._sgen_id, inplace=True)
+        if self._load_id is not None and self._load_id in self.net.load.index:
+            self.net.load.drop(index=self._load_id, inplace=True)
+
+    def reset_candidate(self) -> None:
+        if isinstance(self.net, ToyNetwork):
+            return
+        if self._sgen_id is not None and self._sgen_id in self.net.sgen.index:
+            self.net.sgen.at[self._sgen_id, "p_mw"] = 0.0
+            self.net.sgen.at[self._sgen_id, "q_mvar"] = 0.0
+        if self._load_id is not None and self._load_id in self.net.load.index:
+            self.net.load.at[self._load_id, "p_mw"] = 0.0
+            self.net.load.at[self._load_id, "q_mvar"] = 0.0
+
+    def evaluate(self, direction: Direction, mw: float) -> DispatchEvaluation:
+        self.tracker.record_candidate_power_flow()
+        if isinstance(self.net, ToyNetwork):
+            return evaluate_dispatch(self.net, self.bus_id, direction, mw, self.settings)
+
+        import pandapower as pp
+
+        self.reset_candidate()
+        if direction == "injection" and self._sgen_id is not None:
+            self.net.sgen.at[self._sgen_id, "p_mw"] = mw
+        elif direction == "withdrawal" and self._load_id is not None:
+            self.net.load.at[self._load_id, "p_mw"] = mw
+        try:
+            pp.runpp(self.net, numba=False)
+        except Exception:
+            return DispatchEvaluation(
+                feasible=False,
+                violations=(
+                    ConstraintViolation(
+                        element_type="power_flow",
+                        element_id=-1,
+                        element_name="pandapower",
+                        metric="converged",
+                        value=0.0,
+                        limit=1.0,
+                    ),
+                ),
+            )
+        violations = tuple(check_constraints(self.net, self.settings))
+        return DispatchEvaluation(
+            feasible=not violations,
+            violations=violations,
+            min_vm_pu=_result_min(self.net, "res_bus", "vm_pu"),
+            max_vm_pu=_result_max(self.net, "res_bus", "vm_pu"),
+            max_loading_percent=_max_loading_percent(self.net),
+        )
+
+
 def _baseline_state(
     net: object,
     bus_id: int,
     settings: ConstraintSettings,
+    tracker: _QstsPerformanceTracker | None = None,
 ) -> _BaselineState:
+    if tracker is not None:
+        tracker.record_baseline_power_flow()
     if isinstance(net, ToyNetwork):
         evaluation = evaluate_dispatch(net, bus_id, "injection", 0.0, settings)
         return _BaselineState(
@@ -838,14 +1232,12 @@ def _baseline_violation_snapshot(
 
 
 def _evaluate_incremental_dispatch(
-    net: object,
-    bus_id: int,
+    evaluator: _QstsDispatchEvaluator,
     direction: Direction,
     mw: float,
-    settings: ConstraintSettings,
     baseline: dict[tuple[str, int, str], float],
 ) -> _IncrementalDispatchEvaluation:
-    evaluation = evaluate_dispatch(net, bus_id, direction, mw, settings)
+    evaluation = evaluator.evaluate(direction, mw)
     candidate = _violation_snapshot(evaluation.violations)
     incremental = classify_incremental_violations(candidate, baseline)
     return _IncrementalDispatchEvaluation(
@@ -859,6 +1251,22 @@ def _evaluate_incremental_dispatch(
             violation.element_type == "power_flow" for violation in evaluation.violations
         ),
     )
+
+
+def _find_max_feasible_with_infeasible_high(
+    upper_mw: float,
+    is_feasible: Any,
+    tolerance_mw: float,
+) -> float:
+    low = 0.0
+    high = upper_mw
+    while high - low > tolerance_mw:
+        midpoint = (low + high) / 2
+        if is_feasible(midpoint):
+            low = midpoint
+        else:
+            high = midpoint
+    return low
 
 
 def _violation_snapshot(
@@ -1029,6 +1437,7 @@ def _contractual_envelope_row(row: ContractualEnvelopeRow) -> dict[str, object]:
         "season": row.season,
         "time_block": row.time_block,
         "allowed_mw_p10": f"{row.allowed_mw_p10:.6f}",
+        "allowed_mw_p25": f"{row.allowed_mw_p25:.6f}",
         "allowed_mw_p50": f"{row.allowed_mw_p50:.6f}",
         "allowed_mw_min": f"{row.allowed_mw_min:.6f}",
         "curtailed_mw_p90": f"{row.curtailed_mw_p90:.6f}",
@@ -1070,24 +1479,183 @@ def _render_investor_decision_table(buses: tuple[QstsBusResult, ...]) -> str:
     return "\n".join(lines)
 
 
+def _qsts_economics_proxy(result: QstsResult) -> QstsEconomicsProxy:
+    if not result.buses:
+        curtailed_mwh = 0.0
+    else:
+        curtailed_mwh = result.buses[0].curtailment.expected_mwh
+    requested_kw = result.request.requested_mw * 1000.0
+    energy_capacity_mwh = result.request.requested_mw * result.request.storage_duration_hours
+    capex = requested_kw * result.request.capex_eur_per_kw
+    annual_gross_revenue = (
+        result.request.requested_mw * result.request.gross_revenue_eur_per_mw_year
+    )
+    annual_curtailment_loss = curtailed_mwh * result.request.curtailment_penalty_eur_per_mwh
+    annual_fixed_opex = requested_kw * result.request.fixed_opex_eur_per_kw_year
+    annual_ebitda = annual_gross_revenue - annual_curtailment_loss - annual_fixed_opex
+    connect_now_value = _discounted_annuity(
+        annual_ebitda,
+        years=result.request.reinforcement_wait_years,
+        discount_rate=result.request.discount_rate,
+    )
+    wait_value = _discounted_annuity(
+        annual_gross_revenue - annual_fixed_opex,
+        years=result.request.reinforcement_wait_years,
+        discount_rate=result.request.discount_rate,
+    )
+    return QstsEconomicsProxy(
+        storage_duration_hours=round(result.request.storage_duration_hours, 6),
+        energy_capacity_mwh=round(energy_capacity_mwh, 6),
+        capex_eur=round(capex, 6),
+        annual_gross_revenue_eur=round(annual_gross_revenue, 6),
+        annual_curtailment_loss_eur=round(annual_curtailment_loss, 6),
+        annual_fixed_opex_eur=round(annual_fixed_opex, 6),
+        annual_ebitda_proxy_eur=round(annual_ebitda, 6),
+        connect_now_value_eur=round(connect_now_value - capex, 6),
+        wait_value_eur=round(wait_value, 6),
+        delta_npv_eur=round((connect_now_value - capex) - wait_value, 6),
+    )
+
+
+def _discounted_annuity(value: float, years: float, discount_rate: float) -> float:
+    if years <= 0:
+        return 0.0
+    whole_years = int(years)
+    fractional_year = years - whole_years
+    total = 0.0
+    for year in range(1, whole_years + 1):
+        total += value / ((1.0 + discount_rate) ** year)
+    if fractional_year > 0:
+        total += (value * fractional_year) / ((1.0 + discount_rate) ** (whole_years + 1))
+    return total
+
+
+def _render_qsts_investment_table(
+    buses: tuple[QstsBusResult, ...],
+    contractual_rows: tuple[ContractualEnvelopeRow, ...],
+) -> str:
+    contract_ranges = _contractual_p10_ranges(contractual_rows)
+    lines = [
+        "| rank | bus_id | verdict | firm_mw | conditional_mw | contract_p10_min_mw | contract_p10_max_mw | qsts_p90_mw | qsts_mwh | dominant_constraint |",
+        "| ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for bus in buses:
+        contract_min, contract_max = contract_ranges.get(bus.bus_id, (None, None))
+        lines.append(
+            "| "
+            f"{bus.rank} | {bus.bus_id} | {bus.qsts_verdict} | "
+            f"{bus.static_firm_capacity_mw:.3f} | "
+            f"{bus.static_conditional_capacity_mw:.3f} | "
+            f"{_format_optional_float(contract_min)} | "
+            f"{_format_optional_float(contract_max)} | "
+            f"{bus.curtailment.p90_mw:.3f} | "
+            f"{bus.curtailment.expected_mwh:.3f} | "
+            f"{bus.main_recurring_constraint or '-'} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_contractual_summary_table(rows: tuple[ContractualEnvelopeRow, ...]) -> str:
+    if not rows:
+        return "No contractual envelope rows available."
+    by_bus_direction: dict[tuple[int, str, Direction], list[ContractualEnvelopeRow]] = {}
+    for row in rows:
+        by_bus_direction.setdefault((row.bus_id, row.bus_name, row.direction), []).append(row)
+    lines = [
+        "| bus_id | direction | blocks | p10_min_mw | p10_max_mw | p10_mean_mw | p90_curtailment_max_mw | dominant_constraint |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for key, group in sorted(by_bus_direction.items(), key=lambda item: item[0]):
+        bus_id, _bus_name, direction = key
+        p10_values = [row.allowed_mw_p10 for row in group]
+        p90_values = [row.curtailed_mw_p90 for row in group]
+        lines.append(
+            "| "
+            f"{bus_id} | {direction} | {len(group)} | "
+            f"{min(p10_values):.3f} | {max(p10_values):.3f} | "
+            f"{(sum(p10_values) / len(p10_values)):.3f} | "
+            f"{max(p90_values):.3f} | "
+            f"{_dominant_string(tuple(row.dominant_incremental_constraint for row in group)) or '-'} |"
+        )
+    return "\n".join(lines)
+
+
 def _render_contractual_envelope_table(rows: tuple[ContractualEnvelopeRow, ...]) -> str:
     if not rows:
         return "No contractual envelope rows available."
     lines = [
-        "| bus_id | direction | season | time_block | allowed_mw_p10 | allowed_mw_p50 | allowed_mw_min | curtailed_mw_p90 | dominant_constraint |",
-        "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| bus_id | direction | season | time_block | allowed_mw_p10 | allowed_mw_p25 | allowed_mw_p50 | allowed_mw_min | curtailed_mw_p90 | dominant_constraint |",
+        "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
         lines.append(
             "| "
             f"{row.bus_id} | {row.direction} | {row.season} | {row.time_block} | "
             f"{row.allowed_mw_p10:.3f} | "
+            f"{row.allowed_mw_p25:.3f} | "
             f"{row.allowed_mw_p50:.3f} | "
             f"{row.allowed_mw_min:.3f} | "
             f"{row.curtailed_mw_p90:.3f} | "
             f"{row.dominant_incremental_constraint or '-'} |"
         )
     return "\n".join(lines)
+
+
+def _contractual_p10_ranges(
+    rows: tuple[ContractualEnvelopeRow, ...],
+) -> dict[int, tuple[float, float]]:
+    values_by_bus: dict[int, list[float]] = {}
+    for row in rows:
+        values_by_bus.setdefault(row.bus_id, []).append(row.allowed_mw_p10)
+    return {
+        bus_id: (min(values), max(values))
+        for bus_id, values in values_by_bus.items()
+        if values
+    }
+
+
+def _static_vs_qsts_comparison_rows(
+    result: QstsResult,
+    contractual_rows: tuple[ContractualEnvelopeRow, ...],
+) -> tuple[dict[str, object], ...]:
+    by_bus: dict[int, list[ContractualEnvelopeRow]] = {}
+    for row in contractual_rows:
+        by_bus.setdefault(row.bus_id, []).append(row)
+    rows: list[dict[str, object]] = []
+    for bus in result.buses:
+        contract = by_bus.get(bus.bus_id, [])
+        rows.append(
+            {
+                "bus_id": bus.bus_id,
+                "bus_name": bus.bus_name,
+                "qsts_verdict": bus.qsts_verdict,
+                "static_firm_capacity_mw": f"{bus.static_firm_capacity_mw:.6f}",
+                "static_conditional_capacity_mw": f"{bus.static_conditional_capacity_mw:.6f}",
+                "contractual_allowed_mw_p10_min": _format_contract_min(
+                    [row.allowed_mw_p10 for row in contract]
+                ),
+                "contractual_allowed_mw_p25_min": _format_contract_min(
+                    [row.allowed_mw_p25 for row in contract]
+                ),
+                "contractual_allowed_mw_p50_min": _format_contract_min(
+                    [row.allowed_mw_p50 for row in contract]
+                ),
+                "contractual_allowed_mw_min": _format_contract_min(
+                    [row.allowed_mw_min for row in contract]
+                ),
+                "qsts_p90_curtailment_mw": f"{bus.curtailment.p90_mw:.6f}",
+                "qsts_expected_curtailment_mwh": f"{bus.curtailment.expected_mwh:.6f}",
+                "main_recurring_constraint": bus.main_recurring_constraint,
+                "runtime_seconds": f"{result.performance.runtime_seconds:.6f}",
+            }
+        )
+    return tuple(rows)
+
+
+def _format_contract_min(values: list[float]) -> str:
+    if not values:
+        return ""
+    return f"{min(values):.6f}"
 
 
 def _render_envelope_comparison_table(comparisons: tuple[QstsEnvelopeComparison, ...]) -> str:
@@ -1166,6 +1734,106 @@ def _qsts_verdict(
     ):
         return "go-with-conditions"
     return "no-go"
+
+
+def _write_run_manifest(
+    result: QstsResult,
+    output_dir: Path,
+    output_paths: dict[str, object],
+    manifest_path: Path,
+    command: Sequence[str] | None,
+) -> None:
+    manifest = {
+        "schema_version": "qsts-run-manifest-v1",
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+        "command": list(command) if command is not None else None,
+        "request": _json_ready(asdict(result.request)),
+        "constraint_settings": _json_ready(asdict(result.settings)),
+        "source": result.source,
+        "outputs": _manifest_outputs(output_dir, output_paths),
+        "environment": {
+            "python_version": sys.version.split()[0],
+            "platform": platform.platform(),
+            "thesegrid_version": _package_version(),
+        },
+        "git": _git_metadata(),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _manifest_outputs(output_dir: Path, output_paths: dict[str, object]) -> dict[str, object]:
+    outputs: dict[str, object] = {}
+    for key, value in output_paths.items():
+        if isinstance(value, Path):
+            outputs[key] = _relative_or_string(value, output_dir)
+        elif isinstance(value, list):
+            outputs[key] = [
+                _relative_or_string(path, output_dir) if isinstance(path, Path) else str(path)
+                for path in value
+            ]
+        else:
+            outputs[key] = str(value)
+    return outputs
+
+
+def _relative_or_string(path: Path, base: Path) -> str:
+    try:
+        return path.relative_to(base).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _json_ready(value: object) -> object:
+    if isinstance(value, Path):
+        return value.as_posix()
+    if isinstance(value, dict):
+        return {str(key): _json_ready(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_ready(item) for item in value]
+    return value
+
+
+def _package_version() -> str:
+    try:
+        return version("thesegrid")
+    except PackageNotFoundError:
+        return "editable"
+
+
+def _git_metadata() -> dict[str, object]:
+    return {
+        "commit": _git_output("rev-parse", "HEAD"),
+        "branch": _git_output("rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": _git_dirty(),
+    }
+
+
+def _git_output(*args: str) -> str | None:
+    try:
+        completed = subprocess.run(
+            ("git", *args),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return completed.stdout.strip() or None
+
+
+def _git_dirty() -> bool | None:
+    try:
+        completed = subprocess.run(
+            ("git", "status", "--short"),
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bool(completed.stdout.strip())
 
 
 def _main_recurring_constraint(counts: dict[str, int]) -> str:

@@ -49,6 +49,7 @@ class ContractualEnvelopeRow:
     season: str
     time_block: str
     allowed_mw_p10: float
+    allowed_mw_p25: float
     allowed_mw_p50: float
     allowed_mw_min: float
     curtailed_mw_p90: float
@@ -92,6 +93,7 @@ def synthesize_contractual_envelope(
                 season=season,
                 time_block=time_block,
                 allowed_mw_p10=round(float(np.quantile(allowed, request.allowed_quantile)), 6),
+                allowed_mw_p25=round(float(np.quantile(allowed, 0.25)), 6),
                 allowed_mw_p50=round(float(np.quantile(allowed, 0.50)), 6),
                 allowed_mw_min=round(float(allowed.min()), 6),
                 curtailed_mw_p90=round(float(np.quantile(curtailed, 0.90)), 6),

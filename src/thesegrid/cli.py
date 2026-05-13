@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import itertools
+import json
 import re
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
 
@@ -17,12 +21,15 @@ from thesegrid.screening import ScreeningRequest, screen_connections, write_scre
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    args._argv = tuple(sys.argv[1:] if argv is None else argv)
     if args.command == "assess":
         return _assess(args)
     if args.command == "screen":
         return _screen(args)
     if args.command == "qsts":
         return _qsts(args)
+    if args.command == "qsts-sweep":
+        return _qsts_sweep(args)
     parser.print_help()
     return 2
 
@@ -136,6 +143,22 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Accepted QSTS expected curtailed MWh for go-with-conditions",
     )
+    qsts.add_argument(
+        "--progress-every-n-hours",
+        type=int,
+        default=250,
+        help="Print compact QSTS progress every N evaluated bus-hours; 0 disables progress",
+    )
+    qsts.add_argument("--storage-duration-hours", type=float, default=4.0)
+    qsts.add_argument("--capex-eur-per-kw", type=float, default=0.0)
+    qsts.add_argument("--fixed-opex-eur-per-kw-year", type=float, default=0.0)
+    qsts.add_argument("--gross-revenue-eur-per-mw-year", type=float, default=0.0)
+    qsts.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
+    qsts.add_argument("--reinforcement-wait-years", type=float, default=5.0)
+    qsts.add_argument("--discount-rate", type=float, default=0.08)
+    sweep = subparsers.add_parser("qsts-sweep", help="Run a QSTS sensitivity sweep from JSON")
+    sweep.add_argument("--config", required=True, type=Path, help="Sweep JSON config path")
+    sweep.add_argument("--output", required=True, type=Path, help="Output directory")
     return parser
 
 
@@ -204,8 +227,16 @@ def _qsts(args: argparse.Namespace) -> int:
             duration_hours=args.duration_hours,
             sample_every_n_hours=args.sample_every_n_hours,
             stratified_sample=args.stratified_sample,
+            progress_every_n_hours=args.progress_every_n_hours,
             p90_curtailment_tolerance_mw=args.p90_curtailment_tolerance_mw,
             expected_curtailment_tolerance_mwh=args.expected_curtailment_tolerance_mwh,
+            storage_duration_hours=args.storage_duration_hours,
+            capex_eur_per_kw=args.capex_eur_per_kw,
+            fixed_opex_eur_per_kw_year=args.fixed_opex_eur_per_kw_year,
+            gross_revenue_eur_per_mw_year=args.gross_revenue_eur_per_mw_year,
+            curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
+            reinforcement_wait_years=args.reinforcement_wait_years,
+            discount_rate=args.discount_rate,
         )
         settings = ConstraintSettings(
             min_vm_pu=args.voltage_min_pu,
@@ -217,9 +248,176 @@ def _qsts(args: argparse.Namespace) -> int:
     except (ImportError, ValueError) as exc:
         print(f"qsts error: {exc}")
         return 2
-    outputs = write_qsts_outputs(result, args.output)
+    outputs = write_qsts_outputs(result, args.output, command=args._argv)
     print(f"qsts validated {len(result.buses)} buses: {outputs.results_csv_path} {outputs.summary_path}")
     return 0
+
+
+def _qsts_sweep(args: argparse.Namespace) -> int:
+    try:
+        config = _load_sweep_config(args.config)
+        scenarios = _sweep_scenarios(config)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"qsts-sweep error: {exc}")
+        return 2
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    for index, scenario in enumerate(scenarios, start=1):
+        scenario_id = f"scenario_{index:03d}"
+        scenario_dir = args.output / scenario_id
+        request = QstsRequest(
+            network_code=config["network_code"],
+            screening_csv=Path(config["screening_csv"]),
+            requested_mw=scenario["requested_mw"],
+            top_n=int(config.get("top_n", 3)),
+            stratified_sample=config.get("sampling", "stratified") == "stratified",
+            p90_curtailment_tolerance_mw=scenario["p90_curtailment_tolerance_mw"],
+            expected_curtailment_tolerance_mwh=scenario[
+                "expected_curtailment_tolerance_mwh"
+            ],
+            progress_every_n_hours=int(config.get("progress_every_n_hours", 0)),
+        )
+        settings = ConstraintSettings(max_vm_pu=scenario["voltage_max_pu"])
+        result = run_qsts(request, settings=settings)
+        write_qsts_outputs(
+            result,
+            scenario_dir,
+            command=("qsts-sweep", "--config", str(args.config), "--scenario", scenario_id),
+        )
+        rows.extend(_sweep_result_rows(scenario_id, scenario, result))
+
+    results_csv = args.output / "sensitivity_results.csv"
+    _write_sensitivity_results(results_csv, rows)
+    summary_path = args.output / "sensitivity_summary.md"
+    summary_path.write_text(_render_sensitivity_summary(rows), encoding="utf-8")
+    manifest_path = args.output / "sweep_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "qsts-sweep-manifest-v1",
+                "generated_at_utc": datetime.now(UTC).isoformat(),
+                "config": config,
+                "scenario_count": len(scenarios),
+                "outputs": {
+                    "sensitivity_results": "sensitivity_results.csv",
+                    "sensitivity_summary": "sensitivity_summary.md",
+                },
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    print(f"qsts-sweep completed {len(scenarios)} scenarios: {results_csv} {summary_path}")
+    return 0
+
+
+def _load_sweep_config(path: Path) -> dict[str, object]:
+    config = json.loads(path.read_text(encoding="utf-8"))
+    required = (
+        "network_code",
+        "screening_csv",
+        "requested_mw",
+        "p90_curtailment_tolerance_mw",
+        "expected_curtailment_tolerance_mwh",
+        "voltage_max_pu",
+    )
+    missing = [key for key in required if key not in config]
+    if missing:
+        raise ValueError(f"missing required sweep config keys: {', '.join(missing)}")
+    for key in required[2:]:
+        if not isinstance(config[key], list) or not config[key]:
+            raise ValueError(f"{key} must be a non-empty list")
+    return config
+
+
+def _sweep_scenarios(config: dict[str, object]) -> list[dict[str, float]]:
+    keys = (
+        "requested_mw",
+        "p90_curtailment_tolerance_mw",
+        "expected_curtailment_tolerance_mwh",
+        "voltage_max_pu",
+    )
+    scenarios: list[dict[str, float]] = []
+    for values in itertools.product(*(config[key] for key in keys)):
+        scenarios.append({key: float(value) for key, value in zip(keys, values)})
+    return scenarios
+
+
+def _sweep_result_rows(
+    scenario_id: str,
+    scenario: dict[str, float],
+    result,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for bus in result.buses:
+        rows.append(
+            {
+                "scenario_id": scenario_id,
+                "bus_id": bus.bus_id,
+                "bus_name": bus.bus_name,
+                "qsts_verdict": bus.qsts_verdict,
+                "requested_mw": f"{scenario['requested_mw']:.6f}",
+                "p90_curtailment_tolerance_mw": f"{scenario['p90_curtailment_tolerance_mw']:.6f}",
+                "expected_curtailment_tolerance_mwh": (
+                    f"{scenario['expected_curtailment_tolerance_mwh']:.6f}"
+                ),
+                "voltage_max_pu": f"{scenario['voltage_max_pu']:.6f}",
+                "static_firm_capacity_mw": f"{bus.static_firm_capacity_mw:.6f}",
+                "static_conditional_capacity_mw": f"{bus.static_conditional_capacity_mw:.6f}",
+                "qsts_p90_curtailment_mw": f"{bus.curtailment.p90_mw:.6f}",
+                "qsts_expected_curtailment_mwh": f"{bus.curtailment.expected_mwh:.6f}",
+                "main_recurring_constraint": bus.main_recurring_constraint,
+            }
+        )
+    return rows
+
+
+def _write_sensitivity_results(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "scenario_id",
+        "bus_id",
+        "bus_name",
+        "qsts_verdict",
+        "requested_mw",
+        "p90_curtailment_tolerance_mw",
+        "expected_curtailment_tolerance_mwh",
+        "voltage_max_pu",
+        "static_firm_capacity_mw",
+        "static_conditional_capacity_mw",
+        "qsts_p90_curtailment_mw",
+        "qsts_expected_curtailment_mwh",
+        "main_recurring_constraint",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _render_sensitivity_summary(rows: list[dict[str, object]]) -> str:
+    if not rows:
+        table = "No QSTS sweep rows available."
+    else:
+        lines = [
+            "| scenario | bus_id | verdict | requested_mw | p90_tol_mw | mwh_tol | voltage_max_pu | qsts_p90_mw | qsts_mwh |",
+            "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for row in rows:
+            lines.append(
+                "| "
+                f"{row['scenario_id']} | {row['bus_id']} | {row['qsts_verdict']} | "
+                f"{row['requested_mw']} | {row['p90_curtailment_tolerance_mw']} | "
+                f"{row['expected_curtailment_tolerance_mwh']} | {row['voltage_max_pu']} | "
+                f"{row['qsts_p90_curtailment_mw']} | {row['qsts_expected_curtailment_mwh']} |"
+            )
+        table = "\n".join(lines)
+    return f"""# QSTS Sensitivity Summary
+
+{table}
+"""
 
 
 if __name__ == "__main__":

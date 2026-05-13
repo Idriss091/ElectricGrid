@@ -19,6 +19,7 @@ def test_contractual_envelope_groups_by_bus_direction_season_and_time_block():
     assert injection.season == "solar_mar_oct"
     assert injection.time_block == "10-13"
     assert injection.allowed_mw_p10 == 3.2
+    assert injection.allowed_mw_p25 == 3.5
     assert injection.allowed_mw_p50 == 4.0
     assert injection.allowed_mw_min == 3.0
     assert injection.curtailed_mw_p90 == 2.0
@@ -28,6 +29,7 @@ def test_contractual_envelope_groups_by_bus_direction_season_and_time_block():
     assert withdrawal.season == "winter_nov_mar"
     assert withdrawal.time_block == "07-10"
     assert withdrawal.allowed_mw_p10 == 2.2
+    assert withdrawal.allowed_mw_p25 == 2.5
     assert withdrawal.allowed_mw_p50 == 3.0
     assert withdrawal.allowed_mw_min == 2.0
     assert withdrawal.curtailed_mw_p90 == 2.8

@@ -14,6 +14,8 @@ How can network hosting capacity be converted into a flexible contractual and ec
 2. Co-optimization of firm capacity, conditional capacity, and flexible envelope.
 3. Time-series validation using synthetic or real yearly profiles.
 4. Techno-economic translation into curtailment risk and investment value.
+5. Sensitivity analysis over curtailment appetite, contractual-envelope conservatism,
+   voltage limits, and economic assumptions.
 
 ## Expected contribution
 
@@ -35,7 +37,9 @@ The contribution is transforming hosting capacity into:
 4. Estimate curtailment risk as expected hours, expected MWh, P50, and P90.
 5. Translate curtailment into EBITDA-at-risk and compare against a wait-for-reinforcement
    proxy.
-6. Report the decision as go, no-go, or go-with-conditions.
+6. Validate top candidates with QSTS, export a static-vs-QSTS comparison, and record
+   runtime/power-flow counts for reproducibility.
+7. Report the decision as go, no-go, or go-with-conditions.
 
 ## Baseline claims to avoid
 

@@ -64,6 +64,14 @@ using the tool for bankable studies.
   value. This is a pre-feasibility synthesis, not an official RTE operating gabarit.
 - QSTS results are a higher-evidence validation layer than the static proxy, but they
   remain benchmark results unless validated against operator study cases.
+- QSTS output bundles include `investment_memo.md` for the investor-facing synthesis and
+  `run_manifest.json` for reproducibility. The manifest records the request, constraint
+  settings, generated artefacts, Python/platform metadata, package version, and git state.
+- QSTS performance counters are diagnostic and include all baseline and candidate
+  power-flow attempts made by the QSTS workflow. They are used to benchmark annual runs,
+  not to certify network feasibility.
+- QSTS investment-memo economics are proxy-based. They use explicit user-provided or
+  default assumptions and must not be treated as a bankable valuation model.
 
 ## French V1 gabarits
 

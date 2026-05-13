@@ -26,6 +26,9 @@ investment-grade flexible connection proposal:
 9. Emit a machine-generated memo into `results/<run_id>/memo.md`.
 10. For top-ranked buses, run QSTS validation using SimBench profiles before making
     claims about hourly envelope feasibility.
+11. Record a machine-readable run manifest for every QSTS output directory so the
+    experiment can be reproduced from the command, request, settings, environment, and
+    git metadata.
 
 ## Multi-bus screening experiment
 
@@ -72,6 +75,11 @@ The first QSTS workflow validates top-ranked BESS candidates from a screening CS
 11. Write `qsts_results.csv`, `investor_decision.csv`, `qsts_summary.md`,
     `qsts_envelope.csv`, `qsts_envelope_summary.csv`, `contractual_envelope.csv`, and
     per-bus detail CSV files.
+12. Write `investment_memo.md` as the investor-facing QSTS decision memo and
+    `run_manifest.json` as the reproducibility record for the generated bundle.
+13. Write `qsts_performance.json`, `static_vs_qsts_comparison.csv`, and
+    `annual_validation_summary.md` so annual and sampled-annual campaigns expose both
+    scientific metrics and runtime cost.
 
 QSTS output must state that it is based on actual hourly power-flow validation and
 that verdicts are baseline-aware. It must also state that the study still excludes
@@ -103,15 +111,34 @@ For multi-bus screening, the product also emits:
 For QSTS validation, the product emits:
 
 - top-N QSTS validation table;
+- investor-facing `investment_memo.md` with primary recommendation, QSTS decision table,
+  contractual-envelope summary, economics proxy, assumptions, and remaining exclusions;
 - investor decision CSV with verdict, firm/conditional MW, QSTS P90 MW, expected MWh,
   and main recurring constraint;
 - per-bus hourly detail files;
 - comparison fields linking static firm/conditional capacity to QSTS curtailment;
 - the QSTS P90 MW and expected MWh curtailment tolerances used for the verdict;
 - a contractual-envelope table that distinguishes conservative P10 allowed MW from
-  diagnostic P50/min allowed MW and P90 curtailed MW;
+  diagnostic P25/P50/min allowed MW and P90 curtailed MW;
 - explicit distinction between proxy screening results and actual hourly power-flow
   validation.
+- `run_manifest.json` with the CLI invocation, request, constraint settings, generated
+  outputs, Python/platform metadata, package version, and git state.
+- `qsts_performance.json` with runtime seconds, power-flow calls, binary-search count,
+  baseline cache hits/misses, evaluated buses, and evaluated bus-hours.
+- `static_vs_qsts_comparison.csv` for direct proxy-vs-QSTS comparison.
+
+## QSTS sensitivity sweep
+
+The first sensitivity workflow is:
+
+```bash
+thesegrid qsts-sweep --config sweep.json --output results/<run_id>
+```
+
+The sweep config varies requested MW, QSTS P90 tolerance, expected-MWh tolerance, and
+voltage max. It writes `sensitivity_results.csv`, `sensitivity_summary.md`,
+`sweep_manifest.json`, and one QSTS output subdirectory per scenario.
 
 ## Scientific outputs
 
@@ -128,6 +155,10 @@ The paper should use the same experiment outputs to build:
 
 - Every run must record network code, bus id, requested MW, economic assumptions, and
   constraint settings.
+- QSTS output directories must include `run_manifest.json`; if the working tree is dirty,
+  that state is recorded instead of silently treating the run as a clean benchmark.
+- Sensitivity sweeps must preserve per-scenario QSTS output directories instead of only
+  writing aggregate CSVs.
 - Raw sources stay in `papers/` or `Scientific-Pappers/`.
 - Code stays in `src/`.
 - Tests stay in `tests/`.
