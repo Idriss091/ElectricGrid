@@ -63,7 +63,7 @@ The first QSTS workflow validates top-ranked BESS candidates from a screening CS
 6. Record convergence, voltage, line loading, transformer loading, feasible MW,
    curtailed MW, raw binding constraint, and incremental binding constraint.
 7. Summarize the worst directional curtailment per timestamp as QSTS expected hours,
-   MWh, P50, and P90.
+   MWh, P50, P90, P95, P99, max MW, and maximum consecutive curtailment event.
 8. Classify `go-with-conditions` only when QSTS P90 curtailed MW and expected curtailed
    MWh are within the configured QSTS curtailment tolerances.
 9. Use stratified QSTS sampling for bounded annual campaigns when full-year validation is
@@ -72,9 +72,9 @@ The first QSTS workflow validates top-ranked BESS candidates from a screening CS
 10. Synthesize a compact contractual envelope from the QSTS-derived hourly envelope using
    RTE-inspired V1 seasons, fixed time blocks, and P10 allowed MW as the conservative
    recommended value.
-11. Write `qsts_results.csv`, `investor_decision.csv`, `qsts_summary.md`,
-    `qsts_envelope.csv`, `qsts_envelope_summary.csv`, `contractual_envelope.csv`, and
-    per-bus detail CSV files.
+11. Write `qsts_results.csv`, `investor_decision.csv`, `qsts_risk_summary.csv`,
+    `qsts_risk_summary.json`, `qsts_summary.md`, `qsts_envelope.csv`,
+    `qsts_envelope_summary.csv`, `contractual_envelope.csv`, and per-bus detail CSV files.
 12. Write `investment_memo.md` as the investor-facing QSTS decision memo and
     `run_manifest.json` as the reproducibility record for the generated bundle.
 13. Write `qsts_performance.json`, `static_vs_qsts_comparison.csv`, and
@@ -112,16 +112,19 @@ For QSTS validation, the product emits:
 
 - top-N QSTS validation table;
 - investor-facing `investment_memo.md` with primary recommendation, QSTS decision table,
-  contractual-envelope summary, economics proxy, assumptions, and remaining exclusions;
+  decision drivers, contractual-envelope summary, economics proxy, assumptions, and
+  remaining exclusions;
 - investor decision CSV with verdict, firm/conditional MW, QSTS P90 MW, expected MWh,
   and main recurring constraint;
 - per-bus hourly detail files;
 - comparison fields linking static firm/conditional capacity to QSTS curtailment;
 - the QSTS P90 MW and expected MWh curtailment tolerances used for the verdict;
+- `qsts_risk_summary.csv` and `qsts_risk_summary.json` with P95/P99/max risk,
+  consecutive-event metrics, verdict driver, and tail-risk flag;
 - a contractual-envelope table that distinguishes conservative P10 allowed MW from
   diagnostic P25/P50/min allowed MW and P90 curtailed MW;
 - explicit distinction between proxy screening results and actual hourly power-flow
-  validation.
+  validation;
 - `run_manifest.json` with the CLI invocation, request, constraint settings, generated
   outputs, Python/platform metadata, package version, and git state.
 - `qsts_performance.json` with runtime seconds, power-flow calls, binary-search count,
@@ -136,8 +139,11 @@ The first sensitivity workflow is:
 thesegrid qsts-sweep --config sweep.json --output results/<run_id>
 ```
 
-The sweep config varies requested MW, QSTS P90 tolerance, expected-MWh tolerance, and
-voltage max. It writes `sensitivity_results.csv`, `sensitivity_summary.md`,
+The sweep config varies requested MW, QSTS P90 tolerance, expected-MWh tolerance, voltage
+max, and optionally `sampling_modes`, `bus_ids`, `start_hour`, `duration_hours`, and
+`sample_every_n_hours`. `sampling_modes` can compare `stratified` against `full_year`;
+if absent, the legacy `sampling` field is used. The sweep writes
+`sensitivity_results.csv`, `sampling_calibration.csv`, `sensitivity_summary.md`,
 `sweep_manifest.json`, and one QSTS output subdirectory per scenario.
 
 ## Scientific outputs

@@ -126,6 +126,23 @@ STATIC_VS_QSTS_COMPARISON_COLUMNS = (
     "runtime_seconds",
 )
 
+QSTS_RISK_SUMMARY_COLUMNS = (
+    "bus_id",
+    "bus_name",
+    "qsts_verdict",
+    "curtailment_hours",
+    "expected_curtailment_mwh",
+    "curtailment_p90_mw",
+    "curtailment_p95_mw",
+    "curtailment_p99_mw",
+    "curtailment_max_mw",
+    "max_event_hours",
+    "max_event_mwh",
+    "dominant_constraint",
+    "verdict_driver",
+    "tail_risk_flag",
+)
+
 
 @dataclass(frozen=True)
 class QstsRequest:
@@ -133,6 +150,7 @@ class QstsRequest:
     screening_csv: Path
     requested_mw: float
     top_n: int = 10
+    bus_ids: tuple[int, ...] = ()
     asset: str = "bess"
     tolerance_mw: float = 0.05
     start_hour: int = 0
@@ -159,6 +177,8 @@ class QstsRequest:
             raise ValueError("requested_mw must be positive")
         if self.top_n <= 0:
             raise ValueError("top_n must be positive")
+        if any(bus_id < 0 for bus_id in self.bus_ids):
+            raise ValueError("bus_ids must be non-negative")
         if self.asset.lower() != "bess":
             raise ValueError("V1 QSTS supports BESS assets only")
         if self.tolerance_mw <= 0:
@@ -277,6 +297,24 @@ class QstsEnvelopeComparison:
 
 
 @dataclass(frozen=True)
+class QstsRiskSummaryRow:
+    bus_id: int
+    bus_name: str
+    qsts_verdict: str
+    curtailment_hours: int
+    expected_curtailment_mwh: float
+    curtailment_p90_mw: float
+    curtailment_p95_mw: float
+    curtailment_p99_mw: float
+    curtailment_max_mw: float
+    max_event_hours: int
+    max_event_mwh: float
+    dominant_constraint: str
+    verdict_driver: str
+    tail_risk_flag: bool
+
+
+@dataclass(frozen=True)
 class QstsPerformanceStats:
     runtime_seconds: float = 0.0
     power_flow_calls: int = 0
@@ -325,16 +363,31 @@ class QstsOutputPaths:
     envelope_csv_path: Path
     envelope_summary_csv_path: Path
     contractual_envelope_csv_path: Path
+    risk_summary_csv_path: Path
+    risk_summary_json_path: Path
     bus_detail_paths: tuple[Path, ...]
 
 
-def select_top_buses_from_screening_csv(csv_path: Path, top_n: int) -> tuple[QstsSelectedBus, ...]:
+def select_top_buses_from_screening_csv(
+    csv_path: Path,
+    top_n: int,
+    bus_ids: tuple[int, ...] = (),
+) -> tuple[QstsSelectedBus, ...]:
     if top_n <= 0:
         raise ValueError("top_n must be positive")
     with csv_path.open(newline="", encoding="utf-8") as handle:
         rows = sorted(csv.DictReader(handle), key=lambda row: int(row["rank"]))
+    if bus_ids:
+        by_bus_id = {int(row["bus_id"]): row for row in rows}
+        missing = [bus_id for bus_id in bus_ids if bus_id not in by_bus_id]
+        if missing:
+            missing_text = ", ".join(str(bus_id) for bus_id in missing)
+            raise ValueError(f"bus_ids not found in screening_csv: {missing_text}")
+        rows = [by_bus_id[bus_id] for bus_id in bus_ids]
+    else:
+        rows = rows[:top_n]
     selected: list[QstsSelectedBus] = []
-    for row in rows[:top_n]:
+    for row in rows:
         selected.append(
             QstsSelectedBus(
                 rank=int(row["rank"]),
@@ -408,7 +461,11 @@ def run_qsts(
     if isinstance(network, ToyNetwork) and request.network_code == "toy":
         raise ValueError("QSTS requires a SimBench network; 'toy' is only for smoke tests")
     profiles = load_simbench_power_profiles(network)
-    selected_buses = select_top_buses_from_screening_csv(request.screening_csv, request.top_n)
+    selected_buses = select_top_buses_from_screening_csv(
+        request.screening_csv,
+        request.top_n,
+        bus_ids=request.bus_ids,
+    )
     time_steps = _profile_time_steps(
         profiles,
         start_hour=request.start_hour,
@@ -464,6 +521,8 @@ def write_qsts_outputs(
     static_vs_qsts_comparison_csv = output_dir / "static_vs_qsts_comparison.csv"
     annual_validation_summary_path = output_dir / "annual_validation_summary.md"
     investor_decision_csv = output_dir / "investor_decision.csv"
+    risk_summary_csv = output_dir / "qsts_risk_summary.csv"
+    risk_summary_json = output_dir / "qsts_risk_summary.json"
     envelope_csv = output_dir / "qsts_envelope.csv"
     envelope_summary_csv = output_dir / "qsts_envelope_summary.csv"
     contractual_envelope_csv = output_dir / "contractual_envelope.csv"
@@ -480,6 +539,22 @@ def write_qsts_outputs(
         writer.writeheader()
         for bus in result.buses:
             writer.writerow(_investor_decision_row(bus))
+
+    risk_summary_rows = summarize_qsts_risk(result)
+    with risk_summary_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=QSTS_RISK_SUMMARY_COLUMNS)
+        writer.writeheader()
+        for row in risk_summary_rows:
+            writer.writerow(_risk_summary_row(row))
+    risk_summary_json.write_text(
+        json.dumps(
+            [_json_ready(asdict(row)) for row in risk_summary_rows],
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
     for bus in result.buses:
         detail_path = output_dir / f"qsts_bus_{bus.bus_id}.csv"
@@ -537,6 +612,8 @@ def write_qsts_outputs(
             "static_vs_qsts_comparison": static_vs_qsts_comparison_csv,
             "annual_validation_summary": annual_validation_summary_path,
             "investor_decision": investor_decision_csv,
+            "qsts_risk_summary": risk_summary_csv,
+            "qsts_risk_summary_json": risk_summary_json,
             "qsts_envelope": envelope_csv,
             "qsts_envelope_summary": envelope_summary_csv,
             "contractual_envelope": contractual_envelope_csv,
@@ -557,6 +634,8 @@ def write_qsts_outputs(
         envelope_csv_path=envelope_csv,
         envelope_summary_csv_path=envelope_summary_csv,
         contractual_envelope_csv_path=contractual_envelope_csv,
+        risk_summary_csv_path=risk_summary_csv,
+        risk_summary_json_path=risk_summary_json,
         bus_detail_paths=tuple(detail_paths),
     )
 
@@ -579,6 +658,62 @@ def qsts_envelope_records(result: QstsResult) -> tuple[QstsEnvelopeRecord, ...]:
                 )
             )
     return tuple(records)
+
+
+def summarize_qsts_risk(result: QstsResult) -> tuple[QstsRiskSummaryRow, ...]:
+    rows: list[QstsRiskSummaryRow] = []
+    for bus in result.buses:
+        frame = pd.DataFrame(asdict(record) for record in bus.hourly_records)
+        if frame.empty:
+            curtailed = pd.Series(dtype=float)
+            dominant_constraint = ""
+        else:
+            frame["curtailed_mw"] = frame["curtailed_mw"].astype(float).clip(lower=0.0)
+            worst_index = frame.groupby("timestamp")["curtailed_mw"].idxmax()
+            worst_by_timestamp = frame.loc[worst_index].sort_values("timestamp")
+            curtailed = worst_by_timestamp["curtailed_mw"].reset_index(drop=True)
+            constraint_counts: dict[str, int] = {}
+            for constraint in frame.loc[
+                frame["curtailed_mw"] > 1e-9,
+                "incremental_binding_constraint",
+            ]:
+                if constraint:
+                    constraint_counts[constraint] = constraint_counts.get(constraint, 0) + 1
+            dominant_constraint = _main_recurring_constraint(constraint_counts)
+        max_event_hours, max_event_mwh = _max_curtailment_event(frame)
+        verdict_driver = _qsts_verdict_driver(
+            bus.curtailment,
+            p90_tolerance_mw=result.request.p90_curtailment_tolerance_mw,
+            mwh_tolerance=result.request.expected_curtailment_tolerance_mwh,
+        )
+        rows.append(
+            QstsRiskSummaryRow(
+                bus_id=bus.bus_id,
+                bus_name=bus.bus_name,
+                qsts_verdict=bus.qsts_verdict,
+                curtailment_hours=int((curtailed > 1e-9).sum()) if not curtailed.empty else 0,
+                expected_curtailment_mwh=round(float(curtailed.sum()), 6)
+                if not curtailed.empty
+                else 0.0,
+                curtailment_p90_mw=_series_quantile(curtailed, 0.90),
+                curtailment_p95_mw=_series_quantile(curtailed, 0.95),
+                curtailment_p99_mw=_series_quantile(curtailed, 0.99),
+                curtailment_max_mw=round(float(curtailed.max()), 6)
+                if not curtailed.empty
+                else 0.0,
+                max_event_hours=max_event_hours,
+                max_event_mwh=max_event_mwh,
+                dominant_constraint=dominant_constraint,
+                verdict_driver=verdict_driver,
+                tail_risk_flag=(
+                    bus.curtailment.p90_mw
+                    <= result.request.p90_curtailment_tolerance_mw + 1e-9
+                    and bus.curtailment.expected_mwh
+                    > result.request.expected_curtailment_tolerance_mwh + 1e-9
+                ),
+            )
+        )
+    return tuple(rows)
 
 
 def summarize_qsts_envelope(
@@ -626,12 +761,14 @@ def render_qsts_summary(result: QstsResult) -> str:
         top_table = "No buses selected for QSTS validation."
         investor_table = "No buses selected for investor decision table."
         baseline_table = "No baseline diagnostics available."
+        risk_table = "No QSTS risk rows available."
         comparison_table = "No envelope comparison available."
         contractual_table = "No contractual envelope available."
     else:
         top_table = _render_qsts_table(result.buses)
         investor_table = _render_investor_decision_table(result.buses)
         baseline_table = _render_baseline_table(result.buses)
+        risk_table = _render_risk_summary_table(summarize_qsts_risk(result))
         comparison_table = _render_envelope_comparison_table(compare_qsts_envelopes(result))
         contractual_table = _render_contractual_envelope_table(
             synthesize_contractual_envelope(qsts_envelope_records(result)).rows
@@ -671,6 +808,10 @@ This report is based on {result.source}. It remains an early-stage buyer-side de
 
 {baseline_table}
 
+## Risk Summary
+
+{risk_table}
+
 ## Envelope Comparison
 
 {comparison_table}
@@ -684,6 +825,7 @@ This report is based on {result.source}. It remains an early-stage buyer-side de
 - QSTS results replay time-varying network operating points before checking BESS injection and withdrawal.
 - QSTS-derived envelope rows are extracted from the hourly feasible MW already computed by QSTS; no extra power-flow pass is hidden in the export step.
 - Contractual envelope rows summarize QSTS-derived allowed MW into RTE-inspired V1 seasons and time blocks using P10 allowed MW as the recommended conservative value.
+- Risk summary rows expose tail events where P90 can hide rare curtailed energy.
 - Verdicts are baseline-aware: pre-existing network violations are separated from new or worsened candidate violations.
 - Static proxy curtailment and QSTS curtailment are not equivalent; QSTS is the higher-evidence validation layer.
 - The study still excludes short-circuit, protection, dynamic stability, N-1 security, harmonics, and official operator planning criteria.
@@ -696,6 +838,7 @@ def render_qsts_investment_memo(result: QstsResult) -> str:
         investor_table = "No investor decision rows available."
         contractual_summary = "No contractual envelope rows available."
         contractual_detail = "No contractual envelope rows available."
+        decision_drivers = "No QSTS decision drivers available."
     else:
         top_bus = result.buses[0]
         primary = (
@@ -707,6 +850,7 @@ def render_qsts_investment_memo(result: QstsResult) -> str:
         investor_table = _render_qsts_investment_table(result.buses, contractual_rows)
         contractual_summary = _render_contractual_summary_table(contractual_rows)
         contractual_detail = _render_contractual_envelope_table(contractual_rows)
+        decision_drivers = _render_decision_drivers(summarize_qsts_risk(result))
     economics = _qsts_economics_proxy(result)
     return f"""# QSTS BESS Investment Memo
 
@@ -729,6 +873,10 @@ This memo is an early-stage buyer-side decision aid for BESS flexible connection
 ## Investor Decision
 
 {investor_table}
+
+## Decision Drivers
+
+{decision_drivers}
 
 ## Contractual Envelope Summary
 
@@ -756,6 +904,7 @@ This memo is an early-stage buyer-side decision aid for BESS flexible connection
 - Static screening is a proxy ranking layer; QSTS is the hourly power-flow validation layer.
 - The contractual envelope is synthesized from QSTS allowed MW by direction, V1 season, and fixed time block.
 - `contract_p10_min_mw` is the tightest conservative contractual MW across the synthesized blocks for a bus.
+- Tail-risk diagnostics explain cases where P90 MW is acceptable but MWh risk rare but energetically material.
 - Remaining exclusions: short-circuit, protection, dynamic stability, N-1 security, harmonics, and official operator planning criteria.
 """
 
@@ -779,6 +928,7 @@ This file summarizes the QSTS validation bundle. It can be used for full-year or
 
 - static_vs_qsts_comparison.csv
 - qsts_performance.json
+- qsts_risk_summary.csv
 - contractual_envelope.csv
 - qsts_results.csv
 - run_manifest.json
@@ -1445,6 +1595,25 @@ def _contractual_envelope_row(row: ContractualEnvelopeRow) -> dict[str, object]:
     }
 
 
+def _risk_summary_row(row: QstsRiskSummaryRow) -> dict[str, object]:
+    return {
+        "bus_id": row.bus_id,
+        "bus_name": row.bus_name,
+        "qsts_verdict": row.qsts_verdict,
+        "curtailment_hours": row.curtailment_hours,
+        "expected_curtailment_mwh": f"{row.expected_curtailment_mwh:.6f}",
+        "curtailment_p90_mw": f"{row.curtailment_p90_mw:.6f}",
+        "curtailment_p95_mw": f"{row.curtailment_p95_mw:.6f}",
+        "curtailment_p99_mw": f"{row.curtailment_p99_mw:.6f}",
+        "curtailment_max_mw": f"{row.curtailment_max_mw:.6f}",
+        "max_event_hours": row.max_event_hours,
+        "max_event_mwh": f"{row.max_event_mwh:.6f}",
+        "dominant_constraint": row.dominant_constraint,
+        "verdict_driver": row.verdict_driver,
+        "tail_risk_flag": row.tail_risk_flag,
+    }
+
+
 def _render_baseline_table(buses: tuple[QstsBusResult, ...]) -> str:
     lines = [
         "| bus_id | baseline_violating_hours | dominant_pre_existing_constraint | max_voltage_pu | max_loading_percent |",
@@ -1477,6 +1646,56 @@ def _render_investor_decision_table(buses: tuple[QstsBusResult, ...]) -> str:
             f"{bus.main_recurring_constraint or '-'} |"
         )
     return "\n".join(lines)
+
+
+def _render_risk_summary_table(rows: tuple[QstsRiskSummaryRow, ...]) -> str:
+    if not rows:
+        return "No QSTS risk rows available."
+    lines = [
+        "| bus_id | verdict | driver | tail_risk | hours | mwh | p90_mw | p95_mw | p99_mw | max_mw | max_event_h | max_event_mwh | dominant_constraint |",
+        "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            f"{row.bus_id} | {row.qsts_verdict} | {row.verdict_driver} | "
+            f"{row.tail_risk_flag} | {row.curtailment_hours} | "
+            f"{row.expected_curtailment_mwh:.3f} | {row.curtailment_p90_mw:.3f} | "
+            f"{row.curtailment_p95_mw:.3f} | {row.curtailment_p99_mw:.3f} | "
+            f"{row.curtailment_max_mw:.3f} | {row.max_event_hours} | "
+            f"{row.max_event_mwh:.3f} | {row.dominant_constraint or '-'} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_decision_drivers(rows: tuple[QstsRiskSummaryRow, ...]) -> str:
+    if not rows:
+        return "No QSTS decision drivers available."
+    lines = [
+        "| bus_id | verdict | driver | interpretation |",
+        "| ---: | --- | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            f"{row.bus_id} | {row.qsts_verdict} | {row.verdict_driver} | "
+            f"{_driver_interpretation(row.verdict_driver, row.tail_risk_flag)} |"
+        )
+    return "\n".join(lines)
+
+
+def _driver_interpretation(verdict_driver: str, tail_risk_flag: bool) -> str:
+    if verdict_driver == "no_curtailment":
+        return "No QSTS curtailment was observed."
+    if tail_risk_flag:
+        return "P90 can look acceptable while MWh shows risk rare but energetically material."
+    if verdict_driver == "p90_exceeds_tolerance":
+        return "Hourly curtailment magnitude exceeds the configured P90 tolerance."
+    if verdict_driver == "both_exceed":
+        return "Both hourly magnitude and expected energy exceed configured tolerances."
+    if verdict_driver == "mwh_exceeds_tolerance":
+        return "Expected curtailed energy exceeds the configured MWh tolerance."
+    return "Curtailment remains within the configured conditional tolerance."
 
 
 def _qsts_economics_proxy(result: QstsResult) -> QstsEconomicsProxy:
@@ -1682,6 +1901,49 @@ def _format_optional_float(value: float | None) -> str:
     return f"{value:.3f}"
 
 
+def _series_quantile(values: pd.Series, quantile: float) -> float:
+    if values.empty:
+        return 0.0
+    return round(float(values.quantile(quantile)), 6)
+
+
+def _max_curtailment_event(frame: pd.DataFrame) -> tuple[int, float]:
+    if frame.empty:
+        return 0, 0.0
+    worst_index = frame.groupby("timestamp")["curtailed_mw"].idxmax()
+    worst = frame.loc[worst_index].copy()
+    worst["curtailed_mw"] = worst["curtailed_mw"].astype(float).clip(lower=0.0)
+    worst = worst.sort_values("timestamp")
+    max_hours = 0
+    max_mwh = 0.0
+    current_hours = 0
+    current_mwh = 0.0
+    previous_timestamp: pd.Timestamp | None = None
+    for item in worst.itertuples(index=False):
+        timestamp = pd.to_datetime(item.timestamp, errors="coerce")
+        curtailed_mw = float(item.curtailed_mw)
+        consecutive = (
+            current_hours > 0
+            and not pd.isna(timestamp)
+            and previous_timestamp is not None
+            and (timestamp - previous_timestamp).total_seconds() == 3600
+        )
+        if curtailed_mw <= 1e-9:
+            current_hours = 0
+            current_mwh = 0.0
+            previous_timestamp = timestamp if not pd.isna(timestamp) else None
+            continue
+        if not consecutive:
+            current_hours = 0
+            current_mwh = 0.0
+        current_hours += 1
+        current_mwh += curtailed_mw
+        max_hours = max(max_hours, current_hours)
+        max_mwh = max(max_mwh, current_mwh)
+        previous_timestamp = timestamp if not pd.isna(timestamp) else None
+    return max_hours, round(max_mwh, 6)
+
+
 def _max_optional(current: float | None, candidate: float | None) -> float | None:
     if candidate is None:
         return current
@@ -1734,6 +1996,24 @@ def _qsts_verdict(
     ):
         return "go-with-conditions"
     return "no-go"
+
+
+def _qsts_verdict_driver(
+    curtailment: CurtailmentEstimate,
+    p90_tolerance_mw: float,
+    mwh_tolerance: float,
+) -> str:
+    if curtailment.p90_mw <= 1e-9 and curtailment.expected_mwh <= 1e-9:
+        return "no_curtailment"
+    p90_exceeds = curtailment.p90_mw > p90_tolerance_mw + 1e-9
+    mwh_exceeds = curtailment.expected_mwh > mwh_tolerance + 1e-9
+    if p90_exceeds and mwh_exceeds:
+        return "both_exceed"
+    if p90_exceeds:
+        return "p90_exceeds_tolerance"
+    if mwh_exceeds:
+        return "mwh_exceeds_tolerance"
+    return "within_tolerance"
 
 
 def _write_run_manifest(

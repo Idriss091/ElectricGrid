@@ -1,6 +1,6 @@
 # Current State and QSTS Next Steps
 
-Date: 2026-05-09
+Date: 2026-05-13
 
 ## Purpose
 
@@ -38,6 +38,7 @@ The MVP can now:
 - export a QSTS investor memo in `investment_memo.md`;
 - export a reproducibility manifest in `run_manifest.json`;
 - export QSTS runtime and power-flow counters in `qsts_performance.json`;
+- export tail-risk diagnostics in `qsts_risk_summary.csv` and `qsts_risk_summary.json`;
 - export static-vs-QSTS comparison metrics in `static_vs_qsts_comparison.csv`;
 - export `annual_validation_summary.md` for full-year or sampled-annual bundles;
 - run QSTS sensitivity sweeps with `thesegrid qsts-sweep`;
@@ -50,25 +51,28 @@ The main user-facing commands are:
 ```bash
 thesegrid assess --network <network_code> --bus <bus_id> --requested-mw <mw> --output <memo_path>
 thesegrid screen --network <network_code> --requested-mw <mw> --output <output_dir>
-thesegrid qsts --network <network_code> --screening-csv <screening_csv> --requested-mw <mw> --top-n <n> --start-hour <h> --duration-hours <h> --sample-every-n-hours <n> --stratified-sample --voltage-min-pu <pu> --voltage-max-pu <pu> --max-loading-percent <percent> --p90-curtailment-tolerance-mw <mw> --expected-curtailment-tolerance-mwh <mwh> --progress-every-n-hours <n> --storage-duration-hours <h> --capex-eur-per-kw <eur> --fixed-opex-eur-per-kw-year <eur> --gross-revenue-eur-per-mw-year <eur> --curtailment-penalty-eur-per-mwh <eur> --reinforcement-wait-years <years> --discount-rate <rate> --output <output_dir>
+thesegrid qsts --network <network_code> --screening-csv <screening_csv> --requested-mw <mw> --top-n <n> --bus-ids <id,id> --start-hour <h> --duration-hours <h> --sample-every-n-hours <n> --stratified-sample --voltage-min-pu <pu> --voltage-max-pu <pu> --max-loading-percent <percent> --p90-curtailment-tolerance-mw <mw> --expected-curtailment-tolerance-mwh <mwh> --progress-every-n-hours <n> --storage-duration-hours <h> --capex-eur-per-kw <eur> --fixed-opex-eur-per-kw-year <eur> --gross-revenue-eur-per-mw-year <eur> --curtailment-penalty-eur-per-mwh <eur> --reinforcement-wait-years <years> --discount-rate <rate> --output <output_dir>
 thesegrid qsts-sweep --config <sweep_json> --output <output_dir>
 ```
 
 ## Verification Performed
 
-The latest automated checks passed after the envelope implementation:
+The latest automated checks before the risk-summary tranche passed after the QSTS
+performance and sweep implementation:
 
-- `python -m pytest -q`: 49 passed, 1 skipped;
-- `.venv/bin/python -m pytest -q`: 50 passed;
+- `python -m pytest -q`: 54 passed, 1 skipped;
+- `.venv/bin/python -m pytest -q`: 55 passed;
 - `python -m ruff check .`: passed.
 
 The `.venv` run includes SimBench-dependent tests.
 
 ## Latest Audit Runs
 
-Latest generated outputs are under:
+Latest generated benchmark outputs are under:
 
-- `results/qsts_envelope_2026-05-09/`.
+- `results/qsts_performance_2026-05-13/`.
+
+The earlier envelope audit remains under `results/qsts_envelope_2026-05-09/`.
 
 ### Toy Network
 
@@ -175,6 +179,26 @@ Result:
 This run is not a full annual study. It is useful as a reproducible smoke campaign
 showing that the compact envelope summary now groups by real month/hour/direction.
 
+### Full-Year Top-1 QSTS
+
+A full-year top-1 run was completed on `1-MV-rural--0-sw` after the in-place QSTS
+candidate evaluator was added.
+
+Output:
+
+- `results/qsts_risk_summary_2026-05-13/qsts_top1_full_year_tol3/`.
+
+Result:
+
+| bus | evaluated hours | runtime seconds | power-flow calls | QSTS verdict | QSTS P90 MW | QSTS MWh | main constraint |
+| ---: | ---: | ---: | ---: | --- | ---: | ---: | --- |
+| 2 | 8784 | 640.895 | 26716 | `no-go` | 0.000 | 120.977 | new high voltage at bus 15 |
+
+This run meets the 15-minute target for top-1 annual validation, but it exposes the
+central decision issue: P90 MW can be zero while expected curtailed energy is material.
+The next implementation tranche therefore adds tail-risk diagnostics rather than
+prioritizing C/Rust migration.
+
 ## Observed Strengths
 
 The current MVP is now stronger than the original static screening prototype:
@@ -212,11 +236,12 @@ The current MVP is now stronger than the original static screening prototype:
 
 ## Observed Weaknesses
 
-### QSTS Is Still A Short-Window Validation In The Audit
+### QSTS Sampling Can Miss Rare Annual Risk
 
-The latest QSTS audit used a 24-hour window, not the full year. This is enough to
-validate behavior and expose methodological issues, but it is not yet a scientific
-annual result.
+The stratified top-3 run can classify a candidate as `go` while the full-year top-1
+run classifies the same top bus as `no-go` because rare curtailed-energy events appear
+outside the sample. Sampling is useful for iteration, but it must now be calibrated
+against annual reference runs.
 
 ### Static And QSTS Curtailment Are Not Equivalent
 
@@ -226,12 +251,11 @@ screening is useful for ranking, but QSTS is the higher-evidence validation laye
 For example, bus 21 has static P90 curtailment of 0.273 MW, but QSTS P90 curtailment
 of 2.098 MW in the first 24-hour validation window.
 
-### QSTS Runtime Still Needs More Performance Work
+### QSTS Runtime Is Usable For Top-1 But Still Costly For Campaigns
 
-The bounded 24-hour top-3 QSTS runs are manageable, and the sampled annual run is
-usable. Full annual QSTS with binary search per hour, direction, and bus will still
-be expensive. Annual campaigns should use careful `top_n`, time-window controls,
-caching, and possibly parallelization.
+The full-year top-1 benchmark finished in 657 seconds. This is acceptable for a
+reference run, but top-3 or sweep campaigns still need careful `top_n`, forced
+`--bus-ids`, sampling calibration, and runtime reporting.
 
 ### The Economic Layer Is Still Proxy-Based
 
@@ -255,29 +279,27 @@ working bridge from:
 3. baseline-aware QSTS validation;
 4. user-defined QSTS curtailment tolerance;
 5. revised `go`, `no-go`, or `go-with-conditions` decision;
-6. QSTS-derived hourly, compact, and contractual flexible-envelope exports.
+6. QSTS-derived hourly, compact, and contractual flexible-envelope exports;
+7. tail-risk diagnostics explaining verdict drivers beyond P90 alone.
 
 The most important product/science insight is that the acceptable connection decision
-depends on the investor's tolerance for QSTS P90 curtailed MW and on whether the
-candidate is judged by a static proxy or an hourly QSTS-derived envelope.
+depends on both the investor's tolerance for QSTS P90 curtailed MW and the expected
+curtailed MWh. P90 alone is not sufficient for rare but material events.
 
 ## Recommended Next Implementation Scope
 
-The next implementation step should harden the new contractual-envelope layer:
+The next implementation step should harden the decision layer:
 
-1. Benchmark contractual-envelope behavior on full annual top-1 and top-3 QSTS runs.
-2. Add sensitivity runs over contractual conservatism, including P10, P25, minimum, and P50
-   allowed MW.
-3. Add annual sensitivity runs over:
+1. Use `qsts_risk_summary.csv` to explain `go`, `go-with-conditions`, and `no-go`
+   verdict drivers.
+2. Calibrate stratified and sampled sweeps against full-year top-1 reference runs.
+3. Use `--bus-ids` to run controlled validation cases under one tolerance policy.
+4. Add sensitivity runs over:
    - requested MW;
    - QSTS P90 tolerance;
    - QSTS expected MWh tolerance;
    - voltage limit;
    - waiting-cost and curtailment-penalty assumptions.
-4. Add runtime controls:
-   - cache baseline snapshots;
-   - cache profile-loaded networks;
-   - optionally parallelize across buses.
 5. Add stronger validation cases with one clear `go`, one `go-with-conditions`, and
    one `no-go` under the same tolerance policy.
 
@@ -290,13 +312,13 @@ Before larger campaigns, the following corrections should be made:
 2. Validate whether P10 allowed MW is the right default contractual value versus minimum
    or P25 allowed MW.
 3. Benchmark whether the QSTS investor memo is sufficient for a first external demo.
-4. Benchmark a full annual top-1 run before attempting full annual top-10.
-5. Use `qsts_performance.json` to decide whether the next optimization should be
+4. Use `qsts_performance.json` to decide whether the next optimization should be
    pandapower recycling, parallelization, or a compiled backend investigation.
 
 ## Current Decision
 
-Proceed next with contractual-envelope validation and performance hardening.
+Proceed next with decision robustness: risk-summary outputs, sampling calibration, and
+controlled annual validation cases.
 
 Do not move to OPF or advanced dynamic operating envelope optimization until the
 QSTS-derived envelope is reproducible, summarized clearly, compared against the

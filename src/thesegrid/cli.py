@@ -99,6 +99,10 @@ def _build_parser() -> argparse.ArgumentParser:
     qsts.add_argument("--requested-mw", required=True, type=float, help="Requested BESS MW")
     qsts.add_argument("--output", type=Path, required=True, help="Output directory")
     qsts.add_argument("--top-n", type=int, default=10, help="Top screening rows to validate")
+    qsts.add_argument(
+        "--bus-ids",
+        help="Comma-separated screening bus IDs to validate; overrides --top-n selection",
+    )
     qsts.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
     qsts.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
     qsts.add_argument("--duration-hours", type=int, help="Number of hourly profile steps to validate")
@@ -222,6 +226,7 @@ def _qsts(args: argparse.Namespace) -> int:
             screening_csv=args.screening_csv,
             requested_mw=args.requested_mw,
             top_n=args.top_n,
+            bus_ids=_parse_bus_ids(args.bus_ids),
             asset=args.asset,
             start_hour=args.start_hour,
             duration_hours=args.duration_hours,
@@ -243,7 +248,10 @@ def _qsts(args: argparse.Namespace) -> int:
             max_vm_pu=args.voltage_max_pu,
             max_loading_percent=args.max_loading_percent,
         )
-        print(f"validating top {request.top_n} buses with QSTS...", file=sys.stderr)
+        if request.bus_ids:
+            print(f"validating {len(request.bus_ids)} forced buses with QSTS...", file=sys.stderr)
+        else:
+            print(f"validating top {request.top_n} buses with QSTS...", file=sys.stderr)
         result = run_qsts(request, settings=settings)
     except (ImportError, ValueError) as exc:
         print(f"qsts error: {exc}")
@@ -263,22 +271,30 @@ def _qsts_sweep(args: argparse.Namespace) -> int:
 
     args.output.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
+    calibration_rows: list[dict[str, object]] = []
     for index, scenario in enumerate(scenarios, start=1):
         scenario_id = f"scenario_{index:03d}"
         scenario_dir = args.output / scenario_id
+        sampling_mode = str(scenario["sampling_mode"])
         request = QstsRequest(
-            network_code=config["network_code"],
+            network_code=str(config["network_code"]),
             screening_csv=Path(config["screening_csv"]),
-            requested_mw=scenario["requested_mw"],
+            requested_mw=float(scenario["requested_mw"]),
             top_n=int(config.get("top_n", 3)),
-            stratified_sample=config.get("sampling", "stratified") == "stratified",
-            p90_curtailment_tolerance_mw=scenario["p90_curtailment_tolerance_mw"],
-            expected_curtailment_tolerance_mwh=scenario[
-                "expected_curtailment_tolerance_mwh"
-            ],
+            bus_ids=_config_bus_ids(config),
+            start_hour=int(config.get("start_hour", 0)),
+            duration_hours=(
+                int(config["duration_hours"]) if config.get("duration_hours") is not None else None
+            ),
+            sample_every_n_hours=int(config.get("sample_every_n_hours", 1)),
+            stratified_sample=sampling_mode == "stratified",
+            p90_curtailment_tolerance_mw=float(scenario["p90_curtailment_tolerance_mw"]),
+            expected_curtailment_tolerance_mwh=float(
+                scenario["expected_curtailment_tolerance_mwh"]
+            ),
             progress_every_n_hours=int(config.get("progress_every_n_hours", 0)),
         )
-        settings = ConstraintSettings(max_vm_pu=scenario["voltage_max_pu"])
+        settings = ConstraintSettings(max_vm_pu=float(scenario["voltage_max_pu"]))
         result = run_qsts(request, settings=settings)
         write_qsts_outputs(
             result,
@@ -286,9 +302,12 @@ def _qsts_sweep(args: argparse.Namespace) -> int:
             command=("qsts-sweep", "--config", str(args.config), "--scenario", scenario_id),
         )
         rows.extend(_sweep_result_rows(scenario_id, scenario, result))
+        calibration_rows.extend(_sampling_calibration_rows(scenario_id, scenario, result))
 
     results_csv = args.output / "sensitivity_results.csv"
     _write_sensitivity_results(results_csv, rows)
+    calibration_csv = args.output / "sampling_calibration.csv"
+    _write_sampling_calibration(calibration_csv, calibration_rows)
     summary_path = args.output / "sensitivity_summary.md"
     summary_path.write_text(_render_sensitivity_summary(rows), encoding="utf-8")
     manifest_path = args.output / "sweep_manifest.json"
@@ -302,6 +321,7 @@ def _qsts_sweep(args: argparse.Namespace) -> int:
                 "outputs": {
                     "sensitivity_results": "sensitivity_results.csv",
                     "sensitivity_summary": "sensitivity_summary.md",
+                    "sampling_calibration": "sampling_calibration.csv",
                 },
             },
             indent=2,
@@ -330,25 +350,48 @@ def _load_sweep_config(path: Path) -> dict[str, object]:
     for key in required[2:]:
         if not isinstance(config[key], list) or not config[key]:
             raise ValueError(f"{key} must be a non-empty list")
+    if "sampling_modes" in config:
+        if not isinstance(config["sampling_modes"], list) or not config["sampling_modes"]:
+            raise ValueError("sampling_modes must be a non-empty list")
+        invalid = [
+            mode
+            for mode in config["sampling_modes"]
+            if mode not in {"stratified", "full_year"}
+        ]
+        if invalid:
+            raise ValueError("sampling_modes values must be 'stratified' or 'full_year'")
+    elif config.get("sampling", "stratified") not in {"stratified", "full_year"}:
+        raise ValueError("sampling must be 'stratified' or 'full_year'")
+    if "bus_ids" in config:
+        if not isinstance(config["bus_ids"], list) or not config["bus_ids"]:
+            raise ValueError("bus_ids must be a non-empty list")
+        for bus_id in config["bus_ids"]:
+            if int(bus_id) < 0:
+                raise ValueError("bus_ids must be non-negative")
     return config
 
 
-def _sweep_scenarios(config: dict[str, object]) -> list[dict[str, float]]:
+def _sweep_scenarios(config: dict[str, object]) -> list[dict[str, object]]:
     keys = (
         "requested_mw",
         "p90_curtailment_tolerance_mw",
         "expected_curtailment_tolerance_mwh",
         "voltage_max_pu",
     )
-    scenarios: list[dict[str, float]] = []
-    for values in itertools.product(*(config[key] for key in keys)):
-        scenarios.append({key: float(value) for key, value in zip(keys, values)})
+    scenarios: list[dict[str, object]] = []
+    sampling_modes = config.get("sampling_modes", [config.get("sampling", "stratified")])
+    for values in itertools.product(*(config[key] for key in keys), sampling_modes):
+        numeric_values = values[:-1]
+        sampling_mode = values[-1]
+        scenario = {key: float(value) for key, value in zip(keys, numeric_values)}
+        scenario["sampling_mode"] = str(sampling_mode)
+        scenarios.append(scenario)
     return scenarios
 
 
 def _sweep_result_rows(
     scenario_id: str,
-    scenario: dict[str, float],
+    scenario: dict[str, object],
     result,
 ) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
@@ -359,12 +402,13 @@ def _sweep_result_rows(
                 "bus_id": bus.bus_id,
                 "bus_name": bus.bus_name,
                 "qsts_verdict": bus.qsts_verdict,
-                "requested_mw": f"{scenario['requested_mw']:.6f}",
-                "p90_curtailment_tolerance_mw": f"{scenario['p90_curtailment_tolerance_mw']:.6f}",
+                "sampling_mode": scenario["sampling_mode"],
+                "requested_mw": f"{float(scenario['requested_mw']):.6f}",
+                "p90_curtailment_tolerance_mw": f"{float(scenario['p90_curtailment_tolerance_mw']):.6f}",
                 "expected_curtailment_tolerance_mwh": (
-                    f"{scenario['expected_curtailment_tolerance_mwh']:.6f}"
+                    f"{float(scenario['expected_curtailment_tolerance_mwh']):.6f}"
                 ),
-                "voltage_max_pu": f"{scenario['voltage_max_pu']:.6f}",
+                "voltage_max_pu": f"{float(scenario['voltage_max_pu']):.6f}",
                 "static_firm_capacity_mw": f"{bus.static_firm_capacity_mw:.6f}",
                 "static_conditional_capacity_mw": f"{bus.static_conditional_capacity_mw:.6f}",
                 "qsts_p90_curtailment_mw": f"{bus.curtailment.p90_mw:.6f}",
@@ -381,6 +425,7 @@ def _write_sensitivity_results(path: Path, rows: list[dict[str, object]]) -> Non
         "bus_id",
         "bus_name",
         "qsts_verdict",
+        "sampling_mode",
         "requested_mw",
         "p90_curtailment_tolerance_mw",
         "expected_curtailment_tolerance_mwh",
@@ -402,13 +447,14 @@ def _render_sensitivity_summary(rows: list[dict[str, object]]) -> str:
         table = "No QSTS sweep rows available."
     else:
         lines = [
-            "| scenario | bus_id | verdict | requested_mw | p90_tol_mw | mwh_tol | voltage_max_pu | qsts_p90_mw | qsts_mwh |",
-            "| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+            "| scenario | sampling | bus_id | verdict | requested_mw | p90_tol_mw | mwh_tol | voltage_max_pu | qsts_p90_mw | qsts_mwh |",
+            "| --- | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
         for row in rows:
             lines.append(
                 "| "
-                f"{row['scenario_id']} | {row['bus_id']} | {row['qsts_verdict']} | "
+                f"{row['scenario_id']} | {row['sampling_mode']} | "
+                f"{row['bus_id']} | {row['qsts_verdict']} | "
                 f"{row['requested_mw']} | {row['p90_curtailment_tolerance_mw']} | "
                 f"{row['expected_curtailment_tolerance_mwh']} | {row['voltage_max_pu']} | "
                 f"{row['qsts_p90_curtailment_mw']} | {row['qsts_expected_curtailment_mwh']} |"
@@ -418,6 +464,63 @@ def _render_sensitivity_summary(rows: list[dict[str, object]]) -> str:
 
 {table}
 """
+
+
+def _sampling_calibration_rows(
+    scenario_id: str,
+    scenario: dict[str, object],
+    result,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for bus in result.buses:
+        rows.append(
+            {
+                "scenario_id": scenario_id,
+                "sampling_mode": scenario["sampling_mode"],
+                "bus_id": bus.bus_id,
+                "qsts_verdict": bus.qsts_verdict,
+                "evaluated_hours": result.performance.evaluated_time_steps,
+                "expected_mwh": f"{bus.curtailment.expected_mwh:.6f}",
+                "p90_mw": f"{bus.curtailment.p90_mw:.6f}",
+                "runtime_seconds": f"{result.performance.runtime_seconds:.6f}",
+            }
+        )
+    return rows
+
+
+def _write_sampling_calibration(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = [
+        "scenario_id",
+        "sampling_mode",
+        "bus_id",
+        "qsts_verdict",
+        "evaluated_hours",
+        "expected_mwh",
+        "p90_mw",
+        "runtime_seconds",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _parse_bus_ids(value: str | None) -> tuple[int, ...]:
+    if not value:
+        return ()
+    bus_ids: list[int] = []
+    for raw in value.split(","):
+        item = raw.strip()
+        if not item:
+            continue
+        bus_ids.append(int(item))
+    return tuple(bus_ids)
+
+
+def _config_bus_ids(config: dict[str, object]) -> tuple[int, ...]:
+    if "bus_ids" not in config:
+        return ()
+    return tuple(int(bus_id) for bus_id in config["bus_ids"])
 
 
 if __name__ == "__main__":
