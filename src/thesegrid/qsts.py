@@ -31,6 +31,9 @@ QSTS_RESULT_COLUMNS = (
     "bus_id",
     "bus_name",
     "qsts_verdict",
+    "validation_level",
+    "decision_confidence",
+    "recommended_next_action",
     "requested_mw",
     "static_firm_capacity_mw",
     "static_conditional_capacity_mw",
@@ -89,6 +92,9 @@ INVESTOR_DECISION_COLUMNS = (
     "bus_id",
     "bus_name",
     "qsts_verdict",
+    "validation_level",
+    "decision_confidence",
+    "recommended_next_action",
     "static_firm_capacity_mw",
     "static_conditional_capacity_mw",
     "qsts_p90_curtailment_mw",
@@ -325,11 +331,17 @@ class QstsPerformanceStats:
     baseline_cache_misses: int = 0
     evaluated_time_steps: int = 0
     evaluated_buses: int = 0
+    evaluated_bus_hours: int = 0
+    power_flow_calls_per_bus_hour: float = 0.0
+    runtime_seconds_per_bus_hour: float = 0.0
+    parallelization_unit: str = "bus"
 
 
 @dataclass(frozen=True)
 class QstsEconomicsProxy:
     storage_duration_hours: float
+    reinforcement_wait_years: float
+    discount_rate: float
     energy_capacity_mwh: float
     capex_eur: float
     annual_gross_revenue_eur: float
@@ -532,13 +544,25 @@ def write_qsts_outputs(
         writer = csv.DictWriter(handle, fieldnames=QSTS_RESULT_COLUMNS)
         writer.writeheader()
         for bus in result.buses:
-            writer.writerow(_bus_result_row(bus))
+            writer.writerow(
+                _bus_result_row(
+                    bus,
+                    result.request,
+                    evaluated_time_steps=result.performance.evaluated_time_steps,
+                )
+            )
 
     with investor_decision_csv.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=INVESTOR_DECISION_COLUMNS)
         writer.writeheader()
         for bus in result.buses:
-            writer.writerow(_investor_decision_row(bus))
+            writer.writerow(
+                _investor_decision_row(
+                    bus,
+                    result.request,
+                    evaluated_time_steps=result.performance.evaluated_time_steps,
+                )
+            )
 
     risk_summary_rows = summarize_qsts_risk(result)
     with risk_summary_csv.open("w", newline="", encoding="utf-8") as handle:
@@ -764,14 +788,30 @@ def render_qsts_summary(result: QstsResult) -> str:
         risk_table = "No QSTS risk rows available."
         comparison_table = "No envelope comparison available."
         contractual_table = "No contractual envelope available."
+        recommended_next_action = "not_applicable"
     else:
-        top_table = _render_qsts_table(result.buses)
-        investor_table = _render_investor_decision_table(result.buses)
+        top_table = _render_qsts_table(
+            result.buses,
+            result.request,
+            evaluated_time_steps=result.performance.evaluated_time_steps,
+        )
+        investor_table = _render_investor_decision_table(
+            result.buses,
+            result.request,
+            evaluated_time_steps=result.performance.evaluated_time_steps,
+        )
         baseline_table = _render_baseline_table(result.buses)
         risk_table = _render_risk_summary_table(summarize_qsts_risk(result))
         comparison_table = _render_envelope_comparison_table(compare_qsts_envelopes(result))
         contractual_table = _render_contractual_envelope_table(
             synthesize_contractual_envelope(qsts_envelope_records(result)).rows
+        )
+        primary_risk = summarize_qsts_risk(result)[0]
+        recommended_next_action = _recommended_next_action(
+            result.buses[0].qsts_verdict,
+            primary_risk.verdict_driver,
+            result.request,
+            result.performance.evaluated_time_steps,
         )
     return f"""# QSTS Top-N BESS Validation Summary
 
@@ -795,6 +835,9 @@ This report is based on {result.source}. It remains an early-stage buyer-side de
 - max_loading_percent: {result.settings.max_loading_percent:.3f}
 - evaluated_buses: {len(result.buses)}
 - baseline_mode: pre-existing violations ignored unless worsened by candidate
+- validation_level: {_validation_level(result.request, result.performance.evaluated_time_steps)}
+- decision_confidence: {_decision_confidence(result.request, result.performance.evaluated_time_steps)}
+- recommended_next_action: {recommended_next_action}
 
 ## Results
 
@@ -824,6 +867,7 @@ This report is based on {result.source}. It remains an early-stage buyer-side de
 
 - QSTS results replay time-varying network operating points before checking BESS injection and withdrawal.
 - QSTS-derived envelope rows are extracted from the hourly feasible MW already computed by QSTS; no extra power-flow pass is hidden in the export step.
+- Validation levels are progressive: screening_only is triage, qsts_short is smoke validation, qsts_stratified is pre-demo evidence, and qsts_full_year is the MVP investor reference.
 - Contractual envelope rows summarize QSTS-derived allowed MW into RTE-inspired V1 seasons and time blocks using P10 allowed MW as the recommended conservative value.
 - Risk summary rows expose tail events where P90 can hide rare curtailed energy.
 - Verdicts are baseline-aware: pre-existing network violations are separated from new or worsened candidate violations.
@@ -835,6 +879,7 @@ This report is based on {result.source}. It remains an early-stage buyer-side de
 def render_qsts_investment_memo(result: QstsResult) -> str:
     if not result.buses:
         primary = "No candidate bus was selected for QSTS validation."
+        decision_snapshot = "No QSTS decision rows available."
         investor_table = "No investor decision rows available."
         contractual_summary = "No contractual envelope rows available."
         contractual_detail = "No contractual envelope rows available."
@@ -851,14 +896,21 @@ def render_qsts_investment_memo(result: QstsResult) -> str:
         contractual_summary = _render_contractual_summary_table(contractual_rows)
         contractual_detail = _render_contractual_envelope_table(contractual_rows)
         decision_drivers = _render_decision_drivers(summarize_qsts_risk(result))
+        decision_snapshot = _render_decision_snapshot(result)
     economics = _qsts_economics_proxy(result)
     return f"""# QSTS BESS Investment Memo
 
 This memo is an early-stage buyer-side decision aid for BESS flexible connection pre-feasibility. It does not replace an official grid-connection study.
 
+Cette enveloppe est une approximation pré-faisabilité inspirée du cadre RTE/CRE ; elle ne constitue pas une PTF ni une offre officielle RTE/Enedis.
+
 ## Primary Recommendation
 
 {primary}
+
+## Decision Snapshot
+
+{decision_snapshot}
 
 ## Request
 
@@ -871,6 +923,10 @@ This memo is an early-stage buyer-side decision aid for BESS flexible connection
 - qsts_expected_curtailment_tolerance_mwh: {result.request.expected_curtailment_tolerance_mwh:.3f}
 
 ## Investor Decision
+
+{investor_table}
+
+## Three-Site Comparison
 
 {investor_table}
 
@@ -888,7 +944,13 @@ This memo is an early-stage buyer-side decision aid for BESS flexible connection
 
 ## Economics Proxy
 
+This is a proxy, not bankable revenue modelling. It is intended to compare connect-now
+under a flexible gabarit against waiting for reinforcement; it is not a PTF, an
+official offer, or a financing model.
+
 - storage_duration_hours: {economics.storage_duration_hours:.3f}
+- reinforcement_wait_years: {economics.reinforcement_wait_years:.3f}
+- discount_rate: {economics.discount_rate:.3f}
 - energy_capacity_mwh: {economics.energy_capacity_mwh:.3f}
 - capex_eur: {economics.capex_eur:.2f}
 - annual_gross_revenue_eur: {economics.annual_gross_revenue_eur:.2f}
@@ -910,9 +972,17 @@ This memo is an early-stage buyer-side decision aid for BESS flexible connection
 
 
 def render_annual_validation_summary(result: QstsResult) -> str:
+    risk_table = _render_risk_summary_table(summarize_qsts_risk(result))
     return f"""# Annual Validation Summary
 
 This file summarizes the QSTS validation bundle. It can be used for full-year or sampled annual campaigns; check `run_manifest.json` for the exact sampling mode and duration.
+
+## Validation Level
+
+- validation_level: {_validation_level(result.request, result.performance.evaluated_time_steps)}
+- decision_confidence: {_decision_confidence(result.request, result.performance.evaluated_time_steps)}
+- policy: screening_only -> qsts_short -> qsts_stratified -> qsts_full_year
+- investor_reference: qsts_full_year
 
 ## Runtime
 
@@ -932,6 +1002,10 @@ This file summarizes the QSTS validation bundle. It can be used for full-year or
 - contractual_envelope.csv
 - qsts_results.csv
 - run_manifest.json
+
+## Risk Summary
+
+{risk_table}
 """
 
 
@@ -1218,6 +1292,11 @@ class _QstsPerformanceTracker:
             )
 
     def to_stats(self, runtime_seconds: float) -> QstsPerformanceStats:
+        evaluated_bus_hours = self.evaluated_time_steps
+        power_flow_calls_per_bus_hour = (
+            self.power_flow_calls / evaluated_bus_hours if evaluated_bus_hours else 0.0
+        )
+        runtime_seconds_per_bus_hour = runtime_seconds / evaluated_bus_hours if evaluated_bus_hours else 0.0
         return QstsPerformanceStats(
             runtime_seconds=round(runtime_seconds, 6),
             power_flow_calls=self.power_flow_calls,
@@ -1228,6 +1307,10 @@ class _QstsPerformanceTracker:
             baseline_cache_misses=self.baseline_cache_misses,
             evaluated_time_steps=self.evaluated_time_steps,
             evaluated_buses=self.evaluated_buses,
+            evaluated_bus_hours=evaluated_bus_hours,
+            power_flow_calls_per_bus_hour=round(power_flow_calls_per_bus_hour, 6),
+            runtime_seconds_per_bus_hour=round(runtime_seconds_per_bus_hour, 6),
+            parallelization_unit="bus",
         )
 
 
@@ -1630,15 +1713,27 @@ def _render_baseline_table(buses: tuple[QstsBusResult, ...]) -> str:
     return "\n".join(lines)
 
 
-def _render_investor_decision_table(buses: tuple[QstsBusResult, ...]) -> str:
+def _render_investor_decision_table(
+    buses: tuple[QstsBusResult, ...],
+    request: QstsRequest,
+    evaluated_time_steps: int = 0,
+) -> str:
     lines = [
-        "| rank | bus_id | qsts_verdict | static_firm_mw | static_conditional_mw | qsts_p90_mw | qsts_mwh | main_constraint |",
-        "| ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+        "| rank | bus_id | qsts_verdict | validation_level | confidence | next_action | static_firm_mw | static_conditional_mw | qsts_p90_mw | qsts_mwh | main_constraint |",
+        "| ---: | ---: | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     for bus in buses:
+        driver = _qsts_verdict_driver(
+            bus.curtailment,
+            p90_tolerance_mw=request.p90_curtailment_tolerance_mw,
+            mwh_tolerance=request.expected_curtailment_tolerance_mwh,
+        )
         lines.append(
             "| "
             f"{bus.rank} | {bus.bus_id} | {bus.qsts_verdict} | "
+            f"{_validation_level(request, evaluated_time_steps)} | "
+            f"{_decision_confidence(request, evaluated_time_steps)} | "
+            f"{_recommended_next_action(bus.qsts_verdict, driver, request, evaluated_time_steps)} | "
             f"{bus.static_firm_capacity_mw:.3f} | "
             f"{bus.static_conditional_capacity_mw:.3f} | "
             f"{bus.curtailment.p90_mw:.3f} | "
@@ -1684,6 +1779,35 @@ def _render_decision_drivers(rows: tuple[QstsRiskSummaryRow, ...]) -> str:
     return "\n".join(lines)
 
 
+def _render_decision_snapshot(result: QstsResult) -> str:
+    if not result.buses:
+        return "No QSTS decision rows available."
+    primary_bus = result.buses[0]
+    primary_risk = summarize_qsts_risk(result)[0]
+    lines = [
+        f"- validation_level: {_validation_level(result.request, result.performance.evaluated_time_steps)}",
+        f"- decision_confidence: {_decision_confidence(result.request, result.performance.evaluated_time_steps)}",
+        "- investor_reference: qsts_full_year",
+        "- recommended_next_action: "
+        f"{_recommended_next_action(primary_bus.qsts_verdict, primary_risk.verdict_driver, result.request, result.performance.evaluated_time_steps)}",
+        "",
+        "| bus_id | verdict | p90_mw | expected_mwh | p95_mw | p99_mw | max_mw | dominant_constraint | recommended_next_action |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+    ]
+    risk_by_bus = {row.bus_id: row for row in summarize_qsts_risk(result)}
+    for bus in result.buses:
+        risk = risk_by_bus[bus.bus_id]
+        lines.append(
+            "| "
+            f"{bus.bus_id} | {bus.qsts_verdict} | "
+            f"{bus.curtailment.p90_mw:.3f} | {bus.curtailment.expected_mwh:.3f} | "
+            f"{risk.curtailment_p95_mw:.3f} | {risk.curtailment_p99_mw:.3f} | "
+            f"{risk.curtailment_max_mw:.3f} | {risk.dominant_constraint or '-'} | "
+            f"{_recommended_next_action(bus.qsts_verdict, risk.verdict_driver, result.request, result.performance.evaluated_time_steps)} |"
+        )
+    return "\n".join(lines)
+
+
 def _driver_interpretation(verdict_driver: str, tail_risk_flag: bool) -> str:
     if verdict_driver == "no_curtailment":
         return "No QSTS curtailment was observed."
@@ -1724,6 +1848,8 @@ def _qsts_economics_proxy(result: QstsResult) -> QstsEconomicsProxy:
     )
     return QstsEconomicsProxy(
         storage_duration_hours=round(result.request.storage_duration_hours, 6),
+        reinforcement_wait_years=round(result.request.reinforcement_wait_years, 6),
+        discount_rate=round(result.request.discount_rate, 6),
         energy_capacity_mwh=round(energy_capacity_mwh, 6),
         capex_eur=round(capex, 6),
         annual_gross_revenue_eur=round(annual_gross_revenue, 6),
@@ -2016,6 +2142,46 @@ def _qsts_verdict_driver(
     return "within_tolerance"
 
 
+def _validation_level(request: QstsRequest, evaluated_time_steps: int | None = None) -> str:
+    if request.stratified_sample:
+        return "qsts_stratified"
+    if (
+        evaluated_time_steps is not None
+        and evaluated_time_steps >= 8760
+        and request.sample_every_n_hours == 1
+    ):
+        return "qsts_full_year"
+    return "qsts_short"
+
+
+def _decision_confidence(request: QstsRequest, evaluated_time_steps: int | None = None) -> str:
+    level = _validation_level(request, evaluated_time_steps)
+    if level == "qsts_full_year":
+        return "high"
+    if level == "qsts_stratified":
+        return "medium"
+    return "low"
+
+
+def _recommended_next_action(
+    qsts_verdict: str,
+    verdict_driver: str,
+    request: QstsRequest,
+    evaluated_time_steps: int | None = None,
+) -> str:
+    if _validation_level(request, evaluated_time_steps) != "qsts_full_year":
+        if qsts_verdict == "no-go":
+            return "resize_or_run_full_year_validation"
+        return "run_full_year_validation"
+    if qsts_verdict == "go":
+        return "proceed_to_investor_memo"
+    if qsts_verdict == "go-with-conditions":
+        return "proceed_with_conditions"
+    if verdict_driver == "mwh_exceeds_tolerance":
+        return "reject_or_resize_connection"
+    return "reject_or_resize_connection"
+
+
 def _write_run_manifest(
     result: QstsResult,
     output_dir: Path,
@@ -2123,12 +2289,29 @@ def _main_recurring_constraint(counts: dict[str, int]) -> str:
     return f"{constraint}: count={count}"
 
 
-def _bus_result_row(bus: QstsBusResult) -> dict[str, object]:
+def _bus_result_row(
+    bus: QstsBusResult,
+    request: QstsRequest,
+    evaluated_time_steps: int = 0,
+) -> dict[str, object]:
+    driver = _qsts_verdict_driver(
+        bus.curtailment,
+        p90_tolerance_mw=request.p90_curtailment_tolerance_mw,
+        mwh_tolerance=request.expected_curtailment_tolerance_mwh,
+    )
     return {
         "rank": bus.rank,
         "bus_id": bus.bus_id,
         "bus_name": bus.bus_name,
         "qsts_verdict": bus.qsts_verdict,
+        "validation_level": _validation_level(request, evaluated_time_steps),
+        "decision_confidence": _decision_confidence(request, evaluated_time_steps),
+        "recommended_next_action": _recommended_next_action(
+            bus.qsts_verdict,
+            driver,
+            request,
+            evaluated_time_steps,
+        ),
         "requested_mw": f"{bus.requested_mw:.6f}",
         "static_firm_capacity_mw": f"{bus.static_firm_capacity_mw:.6f}",
         "static_conditional_capacity_mw": f"{bus.static_conditional_capacity_mw:.6f}",
@@ -2143,12 +2326,29 @@ def _bus_result_row(bus: QstsBusResult) -> dict[str, object]:
     }
 
 
-def _investor_decision_row(bus: QstsBusResult) -> dict[str, object]:
+def _investor_decision_row(
+    bus: QstsBusResult,
+    request: QstsRequest,
+    evaluated_time_steps: int = 0,
+) -> dict[str, object]:
+    driver = _qsts_verdict_driver(
+        bus.curtailment,
+        p90_tolerance_mw=request.p90_curtailment_tolerance_mw,
+        mwh_tolerance=request.expected_curtailment_tolerance_mwh,
+    )
     return {
         "rank": bus.rank,
         "bus_id": bus.bus_id,
         "bus_name": bus.bus_name,
         "qsts_verdict": bus.qsts_verdict,
+        "validation_level": _validation_level(request, evaluated_time_steps),
+        "decision_confidence": _decision_confidence(request, evaluated_time_steps),
+        "recommended_next_action": _recommended_next_action(
+            bus.qsts_verdict,
+            driver,
+            request,
+            evaluated_time_steps,
+        ),
         "static_firm_capacity_mw": f"{bus.static_firm_capacity_mw:.6f}",
         "static_conditional_capacity_mw": f"{bus.static_conditional_capacity_mw:.6f}",
         "qsts_p90_curtailment_mw": f"{bus.curtailment.p90_mw:.6f}",
@@ -2157,15 +2357,27 @@ def _investor_decision_row(bus: QstsBusResult) -> dict[str, object]:
     }
 
 
-def _render_qsts_table(buses: tuple[QstsBusResult, ...]) -> str:
+def _render_qsts_table(
+    buses: tuple[QstsBusResult, ...],
+    request: QstsRequest,
+    evaluated_time_steps: int = 0,
+) -> str:
     lines = [
-        "| rank | bus_id | bus_name | qsts_verdict | static_firm_mw | static_conditional_mw | qsts_p90_mw | qsts_mwh |",
-        "| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |",
+        "| rank | bus_id | bus_name | qsts_verdict | validation_level | confidence | next_action | static_firm_mw | static_conditional_mw | qsts_p90_mw | qsts_mwh |",
+        "| ---: | ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for bus in buses:
+        driver = _qsts_verdict_driver(
+            bus.curtailment,
+            p90_tolerance_mw=request.p90_curtailment_tolerance_mw,
+            mwh_tolerance=request.expected_curtailment_tolerance_mwh,
+        )
         lines.append(
             "| "
             f"{bus.rank} | {bus.bus_id} | {bus.bus_name} | {bus.qsts_verdict} | "
+            f"{_validation_level(request, evaluated_time_steps)} | "
+            f"{_decision_confidence(request, evaluated_time_steps)} | "
+            f"{_recommended_next_action(bus.qsts_verdict, driver, request, evaluated_time_steps)} | "
             f"{bus.static_firm_capacity_mw:.3f} | {bus.static_conditional_capacity_mw:.3f} | "
             f"{bus.curtailment.p90_mw:.3f} | {bus.curtailment.expected_mwh:.3f} |"
         )

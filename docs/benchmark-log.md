@@ -1,5 +1,11 @@
 # Benchmark Log
 
+Status: historical log. For the current project state, use
+`docs/project-status-2026-05-18.md`.
+
+Archived result paths in this file now live under
+`results/archive/legacy_2026-05-18/`.
+
 This log records reproducible benchmark bundles used to judge MVP progress. Generated
 results stay under `results/`; this file keeps only the evidence needed to interpret the
 state of the project.

@@ -18,6 +18,9 @@ investment-grade flexible connection proposal:
 3. Run firm-capacity binary search for injection and withdrawal.
 4. Identify binding voltage, line, and transformer constraints.
 5. Apply the two French V1 gabarits and the custom envelope fallback.
+   The French V1 gabarits must be represented as explicit rule objects with source
+   labels, validity date, season, time block, direction, allowed value, and prudence
+   level.
 6. Estimate curtailment hours, MWh, P50, and P90 at the evaluated requested MW.
 7. Search the maximum conditional MW accepted under curtailment tolerance and positive
    flexible-value proxy.
@@ -29,6 +32,8 @@ investment-grade flexible connection proposal:
 11. Record a machine-readable run manifest for every QSTS output directory so the
     experiment can be reproduced from the command, request, settings, environment, and
     git metadata.
+12. Compare short and stratified QSTS against one or more full-year QSTS runs with a
+    validation matrix before making investor-grade claims.
 
 ## Multi-bus screening experiment
 
@@ -80,6 +85,10 @@ The first QSTS workflow validates top-ranked BESS candidates from a screening CS
 13. Write `qsts_performance.json`, `static_vs_qsts_comparison.csv`, and
     `annual_validation_summary.md` so annual and sampled-annual campaigns expose both
     scientific metrics and runtime cost.
+14. For calibrated demo cases, write `validation_matrix.csv` and `validation_matrix.md`
+    to compare screening, short QSTS, stratified QSTS, and full-year QSTS verdicts.
+15. For the investor MVP calibration campaign, use `experiments/investor_mvp_calibration.json`
+    as the scenario definition unless a newer dated experiment file supersedes it.
 
 QSTS output must state that it is based on actual hourly power-flow validation and
 that verdicts are baseline-aware. It must also state that the study still excludes
@@ -118,6 +127,8 @@ For QSTS validation, the product emits:
   and main recurring constraint;
 - per-bus hourly detail files;
 - comparison fields linking static firm/conditional capacity to QSTS curtailment;
+- validation matrix outputs that identify false positives, missing full-year validation,
+  and final decisions;
 - the QSTS P90 MW and expected MWh curtailment tolerances used for the verdict;
 - `qsts_risk_summary.csv` and `qsts_risk_summary.json` with P95/P99/max risk,
   consecutive-event metrics, verdict driver, and tail-risk flag;
@@ -128,7 +139,8 @@ For QSTS validation, the product emits:
 - `run_manifest.json` with the CLI invocation, request, constraint settings, generated
   outputs, Python/platform metadata, package version, and git state.
 - `qsts_performance.json` with runtime seconds, power-flow calls, binary-search count,
-  baseline cache hits/misses, evaluated buses, and evaluated bus-hours.
+  baseline cache hits/misses, evaluated buses, evaluated bus-hours, power-flow calls per
+  bus-hour, runtime seconds per bus-hour, and the declared parallelization unit.
 - `static_vs_qsts_comparison.csv` for direct proxy-vs-QSTS comparison.
 
 ## QSTS sensitivity sweep

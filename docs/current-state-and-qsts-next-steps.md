@@ -1,5 +1,11 @@
 # Current State and QSTS Next Steps
 
+Status: historical working log. For the current source of truth, use
+`docs/project-status-2026-05-18.md`.
+
+Historical result paths referenced before the 2026-05-18 canonical demo cleanup now live
+under `results/archive/legacy_2026-05-18/`.
+
 Date: 2026-05-13
 
 ## Purpose
@@ -73,6 +79,21 @@ Latest generated benchmark outputs are under:
 - `results/qsts_performance_2026-05-13/`.
 
 The earlier envelope audit remains under `results/qsts_envelope_2026-05-09/`.
+
+The canonical investor-demo run is under:
+
+- `results/demo_investor_2026-05-18/`.
+
+It uses SimBench network `1-MV-rural--0-sw`, a 5 MW BESS request, representative buses
+2, 21, and 24, QSTS P90 curtailment tolerance of 3 MW, and QSTS expected curtailed-energy
+tolerance of 60 MWh. The run includes static screening, stratified QSTS validation,
+QSTS risk summary, contractual envelope export, static-vs-QSTS comparison, investor
+memo, reproducibility manifest, and performance counters.
+
+It also includes a full-year top-1 QSTS calibration run for bus 2 with the same
+tolerances:
+
+- `results/demo_investor_2026-05-18/qsts_bus2_full_year_tol3_mwh60/`.
 
 ### Toy Network
 
@@ -286,6 +307,11 @@ The most important product/science insight is that the acceptable connection dec
 depends on both the investor's tolerance for QSTS P90 curtailed MW and the expected
 curtailed MWh. P90 alone is not sufficient for rare but material events.
 
+Decision confidence is now explicit in QSTS outputs through `validation_level`,
+`decision_confidence`, and `recommended_next_action`. The policy is documented in
+`docs/decision-policy.md`: screening and short QSTS remain triage layers, stratified
+QSTS is pre-demo evidence, and full-year QSTS is the MVP investor reference.
+
 ## Recommended Next Implementation Scope
 
 The next implementation step should harden the decision layer:
@@ -324,3 +350,73 @@ Do not move to OPF or advanced dynamic operating envelope optimization until the
 QSTS-derived envelope is reproducible, summarized clearly, compared against the
 static proxy and RTE-inspired gabarits, and converted into a compact contract-like
 operating schedule.
+
+## Canonical Investor Demo Run
+
+Date: 2026-05-18
+
+The first 90-day-plan tranche creates a reproducible investor-demo bundle:
+
+- screening output: `results/demo_investor_2026-05-18/screen_5mw/`;
+- representative QSTS output:
+  `results/demo_investor_2026-05-18/qsts_representative_stratified_tol3_mwh60/`;
+- full-year top-1 QSTS calibration:
+  `results/demo_investor_2026-05-18/qsts_bus2_full_year_tol3_mwh60/`;
+- demo walkthrough: `docs/demo-script.md`;
+- metric guide: `docs/interpretation-guide.md`.
+
+Representative stratified QSTS result:
+
+| bus | QSTS verdict | QSTS P90 MW | QSTS MWh | driver |
+| ---: | --- | ---: | ---: | --- |
+| 2 | `go` | 0.000 | 0.000 | no curtailment |
+| 21 | `no-go` | 2.148 | 165.703 | expected MWh exceeds tolerance |
+| 24 | `no-go` | 2.617 | 206.094 | expected MWh exceeds tolerance |
+
+This run makes the central decision lesson explicit: P90 curtailed MW can remain below
+the configured tolerance while expected curtailed MWh still rejects the project. The
+investor-facing verdict therefore needs both power-risk and energy-risk thresholds.
+
+Full-year top-1 calibration result:
+
+| bus | QSTS verdict | QSTS P90 MW | QSTS MWh | curtailment hours | runtime seconds |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 2 | `no-go` | 0.000 | 120.977 | 52 | 659.328 |
+
+The full-year result flips bus 2 from stratified `go` to annual `no-go`, driven by
+expected MWh rather than P90 MW. This confirms that stratified QSTS is useful for fast
+triage, but must be calibrated against annual runs before an investor-grade conclusion.
+
+## Full-Year Multi-Bus Calibration
+
+Date: 2026-05-18
+
+Calibration bundle:
+
+- output root: `results/full_year_calibration_2026-05-18/`;
+- bus 21 full-year QSTS:
+  `results/full_year_calibration_2026-05-18/qsts_bus21_full_year_tol3_mwh60/`;
+- validation matrix:
+  `results/full_year_calibration_2026-05-18/validation_matrix/`.
+
+The comparison matrix uses:
+
+- screening: `results/demo_investor_2026-05-18/screen_5mw/screening.csv`;
+- short QSTS:
+  `results/decision_policy_2026-05-18/qsts_24h_buses_2_21_24_tol3_mwh60/qsts_results.csv`;
+- stratified QSTS:
+  `results/decision_policy_2026-05-18/qsts_stratified_buses_2_21_24_tol3_mwh60/qsts_results.csv`;
+- full-year QSTS for bus 2 and bus 21.
+
+Calibration result:
+
+| bus | screening | short | stratified | full-year | final decision | calibration status |
+| ---: | --- | --- | --- | --- | --- | --- |
+| 2 | `go` | `go` | `go` | `no-go` | `no-go` | `false_positive_stratified` |
+| 21 | `no-go` | `go-with-conditions` | `no-go` | `no-go` | `no-go` | `changed_after_full_year` |
+| 24 | `no-go` | `go-with-conditions` | `no-go` | not run | `requires_full_year_validation` | `requires_full_year_validation` |
+
+Bus 21 confirms that a constrained case can become materially stronger under annual
+validation: expected curtailed energy is 17,759.024 MWh in the full-year run, with
+P90 curtailed power still below the 3 MW tolerance. Bus 24 remains the next optional
+annual run if more calibration depth is needed.

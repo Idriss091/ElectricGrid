@@ -19,6 +19,8 @@ def render_investment_memo(memo: InvestmentMemo) -> str:
 
 This memo is an early-stage buyer-side decision aid. It does not replace an official grid-connection study.
 
+Cette enveloppe est une approximation pré-faisabilité inspirée du cadre RTE/CRE ; elle ne constitue pas une PTF ni une offre officielle RTE/Enedis.
+
 ## Request
 
 - network_code: {request.network_code}

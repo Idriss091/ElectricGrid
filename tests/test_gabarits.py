@@ -1,6 +1,14 @@
 from datetime import datetime
 
-from thesegrid.gabarits import GabaritKind, annual_timestamps, is_restricted, restricted_hours
+from thesegrid.gabarits import (
+    GabaritKind,
+    annual_timestamps,
+    gabarit_rule_rows,
+    is_restricted,
+    render_gabarit_rules_markdown,
+    restricted_hours,
+    rte_cre_inspired_v1_rules,
+)
 
 
 def test_rte_injection_gabarit_restricts_10_to_18_from_march_to_october():
@@ -25,3 +33,37 @@ def test_annual_timestamps_are_hourly_and_restricted_hours_are_reproducible():
 
     assert len(timestamps) == 8760
     assert restricted_hours(timestamps, "injection", GabaritKind.RTE_INJECTION) == 1960
+
+
+def test_rte_cre_inspired_v1_rules_are_explicit_business_objects():
+    rules = rte_cre_inspired_v1_rules()
+
+    injection = next(rule for rule in rules if rule.direction == "injection")
+    assert injection.name == "rte_cre_inspired_v1_injection"
+    assert injection.gabarit == GabaritKind.RTE_INJECTION
+    assert injection.season == "solar_mar_oct"
+    assert injection.time_block == "10-18"
+    assert injection.months == (3, 4, 5, 6, 7, 8, 9, 10)
+    assert injection.start_hour == 10
+    assert injection.end_hour == 18
+    assert injection.allowed_fraction == 0.0
+    assert injection.allowed_mw is None
+    assert injection.source_label == "RTE/CRE-inspired V1 storage gabarit"
+    assert injection.valid_from == "2026-02-12"
+    assert injection.prudence_level == "conservative_pre_feasibility"
+    assert "not an official connection offer" in injection.notes
+
+
+def test_gabarit_rule_rows_and_markdown_expose_french_connection_language():
+    rules = rte_cre_inspired_v1_rules()
+
+    rows = gabarit_rule_rows(rules)
+    rendered = render_gabarit_rules_markdown(rules)
+
+    assert rows[0]["source_label"] == "RTE/CRE-inspired V1 storage gabarit"
+    assert rows[0]["valid_from"] == "2026-02-12"
+    assert rows[0]["prudence_level"] == "conservative_pre_feasibility"
+    assert "gabarit injection/soutirage" in rendered
+    assert "PTF" in rendered
+    assert "capacite d'accueil" in rendered
+    assert "offre optimisee" in rendered
