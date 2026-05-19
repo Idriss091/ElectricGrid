@@ -1,0 +1,15 @@
+{
+  "network_code": "1-MV-rural--0-sw",
+  "screening_csv": "results/investor_mvp_2026-05-18/screen_5mw/screening.csv",
+  "top_n": 3,
+  "bus_ids": [2, 21, 24],
+  "requested_mw": [3.0, 5.0, 7.0],
+  "p90_curtailment_tolerance_mw": [0.0, 1.0, 3.0],
+  "expected_curtailment_tolerance_mwh": [0.0, 60.0, 120.0],
+  "voltage_max_pu": [1.05],
+  "sampling_modes": ["stratified", "full_year"],
+  "start_hour": 0,
+  "duration_hours": null,
+  "sample_every_n_hours": 1,
+  "progress_every_n_hours": 2000
+}

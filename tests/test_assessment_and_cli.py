@@ -28,6 +28,8 @@ def test_render_investment_memo_includes_decision_assumptions_and_uncertainty():
     assert "Assumptions" in rendered
     assert "Remaining Scientific Uncertainty" in rendered
     assert "does not replace an official grid-connection study" in rendered
+    assert "pré-faisabilité inspirée du cadre RTE/CRE" in rendered
+    assert "elle ne constitue pas une PTF ni une offre officielle RTE/Enedis" in rendered
     assert "evaluated_conditional_mw" in rendered
     assert "Envelope Comparison" in rendered
 
