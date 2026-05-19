@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from thesegrid.assessment import assess_connection
+from thesegrid.bundle import write_bundle_report
 from thesegrid.constraints import ConstraintSettings
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
@@ -44,6 +45,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _qsts_sweep(args)
     if args.command == "compare-validation":
         return _compare_validation(args)
+    if args.command == "render-bundle":
+        return _render_bundle(args)
     parser.print_help()
     return 2
 
@@ -226,6 +229,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="One or more full-year QSTS results CSV paths",
     )
     compare.add_argument("--output", required=True, type=Path, help="Output directory")
+    bundle = subparsers.add_parser(
+        "render-bundle",
+        help="Render HTML report, scorecard, and next-campaign guide for an investor bundle",
+    )
+    bundle.add_argument("--bundle", required=True, type=Path, help="Investor bundle directory")
     return parser
 
 
@@ -478,6 +486,15 @@ def _compare_validation(args: argparse.Namespace) -> int:
     )
     outputs = write_validation_matrix_outputs(matrix, args.output)
     print(f"validation matrix: {outputs.csv_path} {outputs.markdown_path}")
+    return 0
+
+
+def _render_bundle(args: argparse.Namespace) -> int:
+    outputs = write_bundle_report(args.bundle)
+    print(
+        "bundle report: "
+        f"{outputs.html_path} {outputs.scorecard_path} {outputs.campaign_guide_path}"
+    )
     return 0
 
 
