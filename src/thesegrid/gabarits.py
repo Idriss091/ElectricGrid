@@ -30,6 +30,12 @@ class GabaritRule:
     allowed_mw: float | None
     source_label: str
     valid_from: str
+    source_publication_date: str
+    effective_date: str
+    source_url: str
+    scope: str
+    hypothesis_status: str
+    limitation: str
     prudence_level: str
     notes: str
 
@@ -44,6 +50,14 @@ class GabaritRule:
 
 SOURCE_LABEL = "RTE/CRE-inspired V1 storage gabarit"
 VALID_FROM = "2026-02-12"
+SOURCE_PUBLICATION_DATE = "2026-02-20"
+SOURCE_URL = (
+    "https://www.services-rte.com/fr/actualites/"
+    "offres-de-raccordement-a-gabarit-pour-les-installations-de-stockage.html"
+)
+SCOPE = "France BESS buyer-side pre-feasibility"
+HYPOTHESIS_STATUS = "thesegrid_proxy_not_official"
+LIMITATION = "Pre-feasibility assumption only; not a PTF, official offer, or operator study."
 PRUDENCE_LEVEL = "conservative_pre_feasibility"
 
 
@@ -71,6 +85,12 @@ def rte_cre_inspired_v1_rules() -> tuple[GabaritRule, ...]:
             allowed_mw=None,
             source_label=SOURCE_LABEL,
             valid_from=VALID_FROM,
+            source_publication_date=SOURCE_PUBLICATION_DATE,
+            effective_date=VALID_FROM,
+            source_url=SOURCE_URL,
+            scope=SCOPE,
+            hypothesis_status=HYPOTHESIS_STATUS,
+            limitation=LIMITATION,
             prudence_level=PRUDENCE_LEVEL,
             notes=notes,
         ),
@@ -87,6 +107,12 @@ def rte_cre_inspired_v1_rules() -> tuple[GabaritRule, ...]:
             allowed_mw=None,
             source_label=SOURCE_LABEL,
             valid_from=VALID_FROM,
+            source_publication_date=SOURCE_PUBLICATION_DATE,
+            effective_date=VALID_FROM,
+            source_url=SOURCE_URL,
+            scope=SCOPE,
+            hypothesis_status=HYPOTHESIS_STATUS,
+            limitation=LIMITATION,
             prudence_level=PRUDENCE_LEVEL,
             notes=notes,
         ),
@@ -103,6 +129,12 @@ def rte_cre_inspired_v1_rules() -> tuple[GabaritRule, ...]:
             allowed_mw=None,
             source_label=SOURCE_LABEL,
             valid_from=VALID_FROM,
+            source_publication_date=SOURCE_PUBLICATION_DATE,
+            effective_date=VALID_FROM,
+            source_url=SOURCE_URL,
+            scope=SCOPE,
+            hypothesis_status=HYPOTHESIS_STATUS,
+            limitation=LIMITATION,
             prudence_level=PRUDENCE_LEVEL,
             notes=notes,
         ),
@@ -134,14 +166,17 @@ def render_gabarit_rules_markdown(rules: tuple[GabaritRule, ...]) -> str:
         "offre optimisee. It remains a public-context pre-feasibility proxy, not an "
         "official operator offer.",
         "",
-        "| name | direction | season | time_block | allowed_fraction | source | valid_from | prudence |",
-        "| --- | --- | --- | --- | ---: | --- | --- | --- |",
+        "| name | direction | season | time_block | allowed_fraction | source | "
+        "source_publication_date | effective_date | scope | hypothesis_status | limitation | prudence |",
+        "| --- | --- | --- | --- | ---: | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for rule in rules:
         lines.append(
             "| "
             f"{rule.name} | {rule.direction} | {rule.season} | {rule.time_block} | "
-            f"{rule.allowed_fraction:.3f} | {rule.source_label} | {rule.valid_from} | "
+            f"{rule.allowed_fraction:.3f} | {rule.source_label} | "
+            f"{rule.source_publication_date} | {rule.effective_date} | {rule.scope} | "
+            f"{rule.hypothesis_status} | {rule.limitation} | "
             f"{rule.prudence_level} |"
         )
     return "\n".join(lines)

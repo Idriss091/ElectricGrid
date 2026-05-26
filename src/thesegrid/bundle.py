@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import html
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -13,6 +14,11 @@ from thesegrid.economic_scenarios import (
     economic_scenario_rows,
     render_economic_scenarios_markdown,
 )
+from thesegrid.gabarits import (
+    gabarit_rule_rows,
+    render_gabarit_rules_markdown,
+    rte_cre_inspired_v1_rules,
+)
 
 
 @dataclass(frozen=True)
@@ -22,6 +28,9 @@ class BundleReportPaths:
     campaign_guide_path: Path
     economic_csv_path: Path
     economic_markdown_path: Path
+    gabarit_csv_path: Path
+    gabarit_markdown_path: Path
+    resize_markdown_path: Path
 
 
 def write_bundle_report(bundle_dir: Path) -> BundleReportPaths:
@@ -31,10 +40,23 @@ def write_bundle_report(bundle_dir: Path) -> BundleReportPaths:
     campaign_guide_path = bundle_dir / "next_calibration_campaign.md"
     economic_csv_path = bundle_dir / "economic_scenarios.csv"
     economic_markdown_path = bundle_dir / "economic_scenarios.md"
+    gabarit_csv_path = bundle_dir / "gabarit_assumptions.csv"
+    gabarit_markdown_path = bundle_dir / "gabarit_assumptions.md"
+    resize_markdown_path = bundle_dir / "resize_recommendation.md"
     economic_scenarios = _economic_scenarios(bundle_dir)
     _write_csv(economic_csv_path, economic_scenario_rows(economic_scenarios))
     economic_markdown_path.write_text(
         render_economic_scenarios_markdown(economic_scenarios, EconomicScenarioAssumptions()),
+        encoding="utf-8",
+    )
+    gabarit_rules = rte_cre_inspired_v1_rules()
+    _write_csv(gabarit_csv_path, list(gabarit_rule_rows(gabarit_rules)))
+    gabarit_markdown_path.write_text(
+        render_gabarit_rules_markdown(gabarit_rules),
+        encoding="utf-8",
+    )
+    resize_markdown_path.write_text(
+        render_resize_recommendation_markdown(bundle_dir),
         encoding="utf-8",
     )
     html_path.write_text(render_bundle_html(bundle_dir), encoding="utf-8")
@@ -46,6 +68,9 @@ def write_bundle_report(bundle_dir: Path) -> BundleReportPaths:
         campaign_guide_path=campaign_guide_path,
         economic_csv_path=economic_csv_path,
         economic_markdown_path=economic_markdown_path,
+        gabarit_csv_path=gabarit_csv_path,
+        gabarit_markdown_path=gabarit_markdown_path,
+        resize_markdown_path=resize_markdown_path,
     )
 
 
@@ -69,6 +94,7 @@ def render_bundle_scorecard(bundle_dir: Path) -> str:
     )
     readiness = _readiness(total_buses, full_year_buses, resize_recommendations)
     runtime_seconds = float(performance.get("total_full_year_runtime_seconds", 0.0))
+    resize_summary = _best_resize_scorecard_line(resize)
 
     return f"""# MVP Evidence Scorecard
 
@@ -78,6 +104,8 @@ def render_bundle_scorecard(bundle_dir: Path) -> str:
 - legacy_qsts_full_year_no_go: {legacy_no_go_full_year}
 - false_positive_stratified: {false_positive_stratified}
 - resize_recommendations: {resize_recommendations}
+- best_resize_recommendation: {resize_summary}
+- decision_policy: docs/mvp-decision-policy.md
 - full_year_runtime_minutes: {runtime_seconds / 60:.2f}
 - qsts_result_rows: {len(qsts)}
 
@@ -86,6 +114,37 @@ def render_bundle_scorecard(bundle_dir: Path) -> str:
 This bundle is demo-ready when all evaluated buses have full-year QSTS evidence and at
 least one rejected site has an actionable resize recommendation. It remains a
 buyer-side pre-feasibility aid and does not replace an official grid-connection study.
+"""
+
+
+def render_resize_recommendation_markdown(bundle_dir: Path) -> str:
+    resize = _read_csv(bundle_dir / "resize_results.csv")
+    best = _best_resize_row(resize)
+    if best is None:
+        return """# Resize Recommendation
+
+No resize recommendation is available.
+"""
+
+    original_mw = _float_or_none(best.get("original_requested_mw")) or 0.0
+    recommended_mw = _float_or_none(best.get("requested_mw")) or 0.0
+    delta_mw = recommended_mw - original_mw
+    bus_id = _resize_bus_id(best)
+    driver = best.get("verdict_driver", "")
+    constraint = best.get("main_recurring_constraint", "")
+    return f"""# Resize Recommendation
+
+Original request: {original_mw:.3f} MW
+Recommended size: {recommended_mw:.3f} MW
+Delta: {delta_mw:.3f} MW
+Bus: {bus_id}
+Decision: {best.get("product_decision", "")}
+Policy verdict: {_selected_policy_verdict(best)}
+Main driver: {driver}
+Dominant constraint: {constraint}
+
+Reason: the original requested MW fails the selected policy; the recommended size is
+the largest tested acceptable resize in `resize_results.csv`.
 """
 
 
@@ -100,6 +159,7 @@ def render_bundle_html(bundle_dir: Path) -> str:
     decision_frontier = _read_csv(bundle_dir / "decision_frontier.csv")
     full_year_candidates = _read_csv(bundle_dir / "full_year_candidate_selection.csv")
     economic_scenarios = _economic_scenarios(bundle_dir)
+    gabarit_rows = _gabarit_assumption_rows(bundle_dir)
     scorecard = render_bundle_scorecard(bundle_dir)
     metrics = _bundle_metrics(validation, resize, qsts, bundle_dir)
     return f"""<!doctype html>
@@ -190,9 +250,21 @@ def render_bundle_html(bundle_dir: Path) -> str:
     </section>
 
     <section>
+      <h2>Recommended Resize</h2>
+      {_render_recommended_resize(resize)}
+    </section>
+
+    <section>
       <h2>Benchmark Status</h2>
       <p class="notice">This bundle uses a SimBench benchmark network. It proves the workflow and decision logic, not the feasibility of a real French site.</p>
       <p>The commercial next step is to run the same workflow on a client, consultant, reconstructed public, or operator-validated network model with explicit data-source labels.</p>
+      <p><strong>MVP Decision Policy:</strong> <code>docs/mvp-decision-policy.md</code>. The default investor-facing policy is <code>standard</code>; thresholds are Thesegrid pre-feasibility assumptions, not official operator thresholds.</p>
+    </section>
+
+    <section>
+      <h2>Regulatory Assumption Traceability</h2>
+      <p class="notice">The RTE/CRE-inspired gabarit preset is a Thesegrid pre-feasibility proxy. Each rule is labelled with source timing, scope, hypothesis status, and limitation to avoid implying an official PTF or operator offer.</p>
+      {_html_table(gabarit_rows)}
     </section>
 
     <section>
@@ -236,6 +308,8 @@ def render_bundle_html(bundle_dir: Path) -> str:
         {_artifact_link("validation_matrix.csv")}
         {_artifact_link("resize_results.csv")}
         {_artifact_link("economic_scenarios.csv")}
+        {_artifact_link("gabarit_assumptions.csv")}
+        {_artifact_link("gabarit_assumptions.md")}
         {_artifact_link("qsts_economics.csv")}
         {_artifact_link("decision_frontier.csv")}
         {_artifact_link("qsts_results.csv")}
@@ -520,9 +594,26 @@ def _render_decision_frontier(rows: list[dict[str, str]]) -> str:
         )
     return (
         "<p>This table reclassifies full-year evidence under several curtailment-risk "
-        "policies. It is a sensitivity layer, not an official network-operator verdict.</p>"
+        "policies. These are Thesegrid policy assumptions for pre-feasibility, not "
+        "official network-operator thresholds. The default investor policy is "
+        "<code>standard</code>.</p>"
+        + _html_table(_decision_policy_rows())
         + _html_table(rows)
     )
+
+
+def _decision_policy_rows() -> list[dict[str, str]]:
+    return [
+        {
+            "policy": policy.name,
+            "policy_max_p90_ratio": f"{policy.max_p90_ratio:.6f}",
+            "policy_max_energy_ratio": f"{policy.max_energy_ratio:.6f}",
+            "policy_max_event_hours": str(policy.max_event_hours),
+            "policy_max_event_mwh_per_mw": f"{policy.max_event_mwh_per_mw:.6f}",
+            "status": "Thesegrid policy assumption, not official threshold",
+        }
+        for policy in DECISION_FRONTIER_POLICIES
+    ]
 
 
 def _render_next_full_year_candidates(rows: list[dict[str, str]]) -> str:
@@ -533,6 +624,120 @@ def _render_next_full_year_candidates(rows: list[dict[str, str]]) -> str:
             "stratified QSTS.</p>"
         )
     return _html_table(rows)
+
+
+def _render_recommended_resize(rows: list[dict[str, str]]) -> str:
+    best = _best_resize_row(rows)
+    if best is None:
+        return "<p>No resize recommendation is available.</p>"
+    original_mw = _float_or_none(best.get("original_requested_mw")) or 0.0
+    recommended_mw = _float_or_none(best.get("requested_mw")) or 0.0
+    delta_mw = recommended_mw - original_mw
+    driver = best.get("verdict_driver", "")
+    constraint = best.get("main_recurring_constraint", "")
+    recommendations = _recommended_resize_rows(rows)
+    summary = _html_table(
+        [
+            {
+                "bus_id": _resize_bus_id(best),
+                "Original request": f"{original_mw:.3f} MW",
+                "Recommended size": f"{recommended_mw:.3f} MW",
+                "Delta": f"{delta_mw:.3f} MW",
+                "Decision": best.get("product_decision", ""),
+                "Policy verdict": _selected_policy_verdict(best),
+                "Main driver": driver,
+                "Dominant constraint": constraint,
+            }
+        ]
+    )
+    return (
+        "<h3>Resize Decision</h3>"
+        + summary
+        + "<h3>Resize Evidence</h3>"
+        + _html_table(recommendations)
+    )
+
+
+def _best_resize_scorecard_line(rows: list[dict[str, str]]) -> str:
+    best = _best_resize_row(rows)
+    if best is None:
+        return "none"
+    original_mw = _float_or_none(best.get("original_requested_mw")) or 0.0
+    recommended_mw = _float_or_none(best.get("requested_mw")) or 0.0
+    return f"bus {_resize_bus_id(best)} from {original_mw:.3f} MW to {recommended_mw:.3f} MW"
+
+
+def _best_resize_row(rows: list[dict[str, str]]) -> dict[str, str] | None:
+    recommendations = _recommended_resize_rows(rows)
+    if not recommendations:
+        return None
+    return max(
+        recommendations,
+        key=lambda row: (
+            _float_or_none(row.get("original_requested_mw")) or 0.0,
+            _float_or_none(row.get("requested_mw")) or 0.0,
+        ),
+    )
+
+
+def _resize_bus_id(row: dict[str, str]) -> str:
+    bus_id = row.get("bus_id", "")
+    if bus_id:
+        return bus_id
+    match = re.search(r"bus(\d+)", row.get("scenario", ""))
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _recommended_resize_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    best_by_key: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if row.get("product_decision") != "resize-recommended":
+            continue
+        key = row.get("bus_id") or row.get("scenario") or row.get("qsts_output_dir", "")
+        if not key:
+            key = str(len(best_by_key))
+        current = best_by_key.get(key)
+        row_mw = _float_or_none(row.get("requested_mw")) or 0.0
+        current_mw = 0.0
+        if current is not None:
+            current_mw = _float_or_none(current.get("requested_mw")) or 0.0
+        if current is None or row_mw > current_mw:
+            best_by_key[key] = row
+    return [
+        {
+            "bus_id": row.get("bus_id", ""),
+            "scenario": row.get("scenario", ""),
+            "original_requested_mw": row.get("original_requested_mw", ""),
+            "recommended_mw": row.get("requested_mw", ""),
+            "requested_mw": row.get("requested_mw", ""),
+            "delta_mw_from_original": row.get("delta_mw_from_original", ""),
+            "selected_policy": row.get("selected_policy", ""),
+            "policy_verdict": _selected_policy_verdict(row),
+            "product_decision": row.get("product_decision", ""),
+            "expected_curtailment_mwh": row.get("expected_curtailment_mwh", ""),
+            "p90_curtailment_mw": row.get("p90_curtailment_mw", ""),
+            "verdict_driver": row.get("verdict_driver", ""),
+            "main_recurring_constraint": row.get("main_recurring_constraint", ""),
+            "delta_npv_eur": row.get("delta_npv_eur", ""),
+        }
+        for row in sorted(
+            best_by_key.values(),
+            key=lambda item: (item.get("bus_id", ""), item.get("scenario", "")),
+        )
+    ]
+
+
+def _selected_policy_verdict(row: dict[str, str]) -> str:
+    selected_policy = row.get("selected_policy", "")
+    if selected_policy:
+        verdict = row.get(f"{selected_policy}_policy_verdict", "")
+        if verdict:
+            return verdict
+    if row.get("policy_verdict"):
+        return row["policy_verdict"]
+    return row.get("qsts_verdict", "")
 
 
 def _format_mw_header(value: float) -> str:
@@ -567,6 +772,13 @@ def _economic_scenarios(bundle_dir: Path):
         resize_rows=_read_csv(bundle_dir / "resize_results.csv"),
         assumptions=EconomicScenarioAssumptions(),
     )
+
+
+def _gabarit_assumption_rows(bundle_dir: Path) -> list[dict[str, str]]:
+    rows = _read_csv(bundle_dir / "gabarit_assumptions.csv")
+    if rows:
+        return rows
+    return _stringify_rows(list(gabarit_rule_rows(rte_cre_inspired_v1_rules())))
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:

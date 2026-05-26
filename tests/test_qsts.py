@@ -14,6 +14,7 @@ from thesegrid.networks import load_network
 from thesegrid.qsts import (
     QstsBusResult,
     QstsHourlyRecord,
+    QstsPerformanceStats,
     QstsRequest,
     QstsResult,
     _decision_confidence,
@@ -986,6 +987,74 @@ def test_qsts_parallel_cli_resumes_completed_bus(tmp_path, monkeypatch):
     assert (output / "merged" / "qsts_results.csv").exists()
 
 
+def test_qsts_parallel_cli_writes_aggregated_performance(tmp_path, monkeypatch):
+    screening_csv = tmp_path / "screening.csv"
+    _write_screening_csv(
+        screening_csv,
+        [
+            {"rank": "1", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+            {"rank": "2", "bus_id": "2", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+        ],
+    )
+
+    def fake_run_qsts(request, settings=None):
+        del settings
+        bus_id = request.bus_ids[0]
+        result = _sample_qsts_result_for_request(request, verdict="go")
+        return QstsResult(
+            request=result.request,
+            buses=result.buses,
+            performance=QstsPerformanceStats(
+                runtime_seconds=10.0 * bus_id,
+                power_flow_calls=100 * bus_id,
+                baseline_power_flow_calls=20 * bus_id,
+                candidate_power_flow_calls=80 * bus_id,
+                binary_search_count=5 * bus_id,
+                baseline_cache_hits=7 * bus_id,
+                baseline_cache_misses=3 * bus_id,
+                evaluated_time_steps=24,
+                evaluated_buses=1,
+                evaluated_bus_hours=24,
+                power_flow_calls_per_bus_hour=(100 * bus_id) / 24,
+                runtime_seconds_per_bus_hour=(10.0 * bus_id) / 24,
+                parallelization_unit="bus",
+            ),
+        )
+
+    monkeypatch.setattr("thesegrid.cli.run_qsts", fake_run_qsts)
+    output = tmp_path / "parallel"
+
+    exit_code = main(
+        [
+            "qsts-parallel",
+            "--network",
+            "1-MV-rural--0-sw",
+            "--screening-csv",
+            str(screening_csv),
+            "--requested-mw",
+            "1",
+            "--bus-ids",
+            "1,2",
+            "--duration-hours",
+            "24",
+            "--workers",
+            "1",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    performance = json.loads((output / "merged" / "qsts_performance.json").read_text())
+    assert performance["total_full_year_runtime_seconds"] == 30.0
+    assert performance["runtime_seconds"] == 30.0
+    assert performance["power_flow_calls"] == 300
+    assert performance["evaluated_time_steps"] == 24
+    assert performance["evaluated_buses"] == 2
+    assert performance["evaluated_bus_hours"] == 48
+    assert performance["parallelization_unit"] == "bus"
+
+
 def test_cli_qsts_sweep_writes_scenario_outputs_and_summary(tmp_path, monkeypatch):
     screening_csv = tmp_path / "screening.csv"
     _write_screening_csv(
@@ -1161,6 +1230,8 @@ def test_cli_qsts_resize_recommends_largest_acceptable_mw(tmp_path, monkeypatch)
             "3",
             "--expected-curtailment-tolerance-mwh",
             "60",
+            "--selected-policy",
+            "flexible",
             "--output",
             str(output),
         ]
@@ -1176,10 +1247,11 @@ def test_cli_qsts_resize_recommends_largest_acceptable_mw(tmp_path, monkeypatch)
     assert rows[-1]["requested_mw"] == "2.000000"
     assert rows[-1]["qsts_verdict"] == "go-with-conditions"
     assert rows[-1]["legacy_qsts_verdict"] == "go-with-conditions"
-    assert rows[-1]["selected_policy"] == "standard"
+    assert rows[-1]["selected_policy"] == "flexible"
     assert rows[-1]["standard_policy_verdict"] == "go-with-conditions"
     summary = (output / "resize_summary.md").read_text(encoding="utf-8")
     assert "product_decision: resize-recommended" in summary
+    assert "selected_policy: flexible" in summary
     assert "recommended_resized_mw: 2.000" in summary
     assert "delta_mw_from_original: 3.000" in summary
     assert "Bus 24 is not acceptable at 5.000 MW" in summary
@@ -1372,6 +1444,15 @@ def test_qsts_outputs_include_weighted_risk_economics_and_frontier(tmp_path):
     assert "p90_curtailment_ratio" in frontier_rows[0]
     assert "max_event_hours" in frontier_rows[0]
     assert "max_event_mwh_per_mw" in frontier_rows[0]
+    assert "policy_max_p90_ratio" in frontier_rows[0]
+    assert "policy_max_energy_ratio" in frontier_rows[0]
+    assert "policy_max_event_hours" in frontier_rows[0]
+    assert "policy_max_event_mwh_per_mw" in frontier_rows[0]
+    standard = next(row for row in frontier_rows if row["policy"] == "standard")
+    assert standard["policy_max_p90_ratio"] == "0.100000"
+    assert standard["policy_max_energy_ratio"] == "0.010000"
+    assert standard["policy_max_event_hours"] == "12"
+    assert standard["policy_max_event_mwh_per_mw"] == "1.000000"
     assert frontier_rows[0]["validation_level"] == "qsts_short"
     manifest = json.loads(outputs.run_manifest_path.read_text(encoding="utf-8"))
     assert manifest["outputs"]["qsts_economics"] == "qsts_economics.csv"

@@ -67,3 +67,29 @@ def test_gabarit_rule_rows_and_markdown_expose_french_connection_language():
     assert "PTF" in rendered
     assert "capacite d'accueil" in rendered
     assert "offre optimisee" in rendered
+
+
+def test_gabarit_rule_rows_expose_regulatory_traceability_fields():
+    rows = gabarit_rule_rows(rte_cre_inspired_v1_rules())
+
+    row = rows[0]
+
+    assert row["source_publication_date"] == "2026-02-20"
+    assert row["effective_date"] == "2026-02-12"
+    assert row["scope"] == "France BESS buyer-side pre-feasibility"
+    assert row["hypothesis_status"] == "thesegrid_proxy_not_official"
+    assert row["source_url"] == (
+        "https://www.services-rte.com/fr/actualites/"
+        "offres-de-raccordement-a-gabarit-pour-les-installations-de-stockage.html"
+    )
+    assert "not a PTF" in row["limitation"]
+
+
+def test_gabarit_markdown_includes_source_scope_hypothesis_and_limit():
+    rendered = render_gabarit_rules_markdown(rte_cre_inspired_v1_rules())
+
+    assert "source_publication_date" in rendered
+    assert "effective_date" in rendered
+    assert "hypothesis_status" in rendered
+    assert "France BESS buyer-side pre-feasibility" in rendered
+    assert "not a PTF" in rendered

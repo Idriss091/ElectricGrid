@@ -131,7 +131,7 @@ can be slow; keep them as explicit calibration jobs rather than synchronous UI r
 ### 7. Resize Recommendation
 
 When a requested MW is rejected, use `qsts-resize` to find the largest lower MW that
-meets the configured QSTS tolerances:
+meets the selected decision-frontier policy:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m thesegrid.cli qsts-resize \
@@ -143,6 +143,7 @@ PYTHONPATH=src .venv/bin/python -m thesegrid.cli qsts-resize \
   --step-mw 1 \
   --p90-curtailment-tolerance-mw 3 \
   --expected-curtailment-tolerance-mwh 60 \
+  --selected-policy standard \
   --output results/demo_investor_2026-05-18/resize_bus24
 ```
 

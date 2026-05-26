@@ -111,14 +111,18 @@ remain valuable at lower capacity. The resize output reports the original reques
 tested MW, delta MW from the original request, product decision, QSTS verdict, dominant
 constraint, curtailment risk, and proxy delta NPV.
 
+`qsts-resize` defaults to `selected_policy=standard`. The legacy QSTS verdict is
+retained for compatibility, but `product_decision` and `acceptable` are based on the
+selected decision-frontier policy.
+
 Product decisions are:
 
 | decision | meaning |
 | --- | --- |
 | `go` | Original requested MW is acceptable without observed QSTS curtailment. |
-| `go-with-conditions` | Original requested MW is acceptable within configured tolerances. |
-| `resize-recommended` | Original requested MW is not acceptable, but a lower tested MW is acceptable. |
-| `no-go` | Tested MW is not acceptable under configured tolerances. |
+| `go-with-conditions` | Original requested MW is acceptable under the selected policy. |
+| `resize-recommended` | Original requested MW is not acceptable, but a lower tested MW is acceptable under the selected policy. |
+| `no-go` | Tested MW is not acceptable under the selected policy. |
 
 `qsts_full_year` is the MVP reference layer, not an official grid-connection study.
 

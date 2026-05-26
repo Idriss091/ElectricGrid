@@ -231,6 +231,12 @@ def _build_parser() -> argparse.ArgumentParser:
     resize.add_argument("--max-loading-percent", type=float, default=100.0)
     resize.add_argument("--p90-curtailment-tolerance-mw", type=float, default=0.0)
     resize.add_argument("--expected-curtailment-tolerance-mwh", type=float, default=0.0)
+    resize.add_argument(
+        "--selected-policy",
+        default="standard",
+        choices=["strict", "standard", "flexible", "aggressive"],
+        help="Decision-frontier policy used for qsts-resize product decisions",
+    )
     resize.add_argument("--progress-every-n-hours", type=int, default=250)
     resize.add_argument("--storage-duration-hours", type=float, default=4.0)
     resize.add_argument("--capex-eur-per-kw", type=float, default=0.0)
@@ -549,6 +555,7 @@ def _merge_qsts_worker_outputs(worker_dirs: Sequence[Path], output_dir: Path) ->
         "qsts_risk_summary.csv",
     ):
         _merge_csv_files([worker_dir / filename for worker_dir in worker_dirs], output_dir / filename)
+    _merge_qsts_performance(worker_dirs, output_dir / "qsts_performance.json")
     manifest_path = output_dir / "parallel_manifest.json"
     manifest_path.write_text(
         json.dumps(
@@ -582,6 +589,62 @@ def _merge_csv_files(input_paths: Sequence[Path], output_path: Path) -> None:
         output_path.write_text("", encoding="utf-8")
         return
     _write_rows(output_path, rows, fieldnames)
+
+
+def _merge_qsts_performance(worker_dirs: Sequence[Path], output_path: Path) -> None:
+    worker_stats = []
+    for worker_dir in worker_dirs:
+        path = worker_dir / "qsts_performance.json"
+        if path.exists():
+            worker_stats.append(json.loads(path.read_text(encoding="utf-8")))
+    if not worker_stats:
+        output_path.write_text("{}\n", encoding="utf-8")
+        return
+
+    summed_fields = (
+        "runtime_seconds",
+        "power_flow_calls",
+        "baseline_power_flow_calls",
+        "candidate_power_flow_calls",
+        "binary_search_count",
+        "baseline_cache_hits",
+        "baseline_cache_misses",
+        "evaluated_buses",
+        "evaluated_bus_hours",
+    )
+    merged: dict[str, object] = {
+        field: sum(float(stats.get(field, 0.0)) for stats in worker_stats)
+        for field in summed_fields
+    }
+    integer_fields = (
+        "power_flow_calls",
+        "baseline_power_flow_calls",
+        "candidate_power_flow_calls",
+        "binary_search_count",
+        "baseline_cache_hits",
+        "baseline_cache_misses",
+        "evaluated_buses",
+        "evaluated_bus_hours",
+    )
+    for field in integer_fields:
+        merged[field] = int(merged[field])
+    merged["evaluated_time_steps"] = max(
+        int(stats.get("evaluated_time_steps", 0)) for stats in worker_stats
+    )
+    bus_hours = int(merged["evaluated_bus_hours"])
+    runtime_seconds = float(merged["runtime_seconds"])
+    power_flow_calls = int(merged["power_flow_calls"])
+    merged["power_flow_calls_per_bus_hour"] = (
+        power_flow_calls / bus_hours if bus_hours else 0.0
+    )
+    merged["runtime_seconds_per_bus_hour"] = runtime_seconds / bus_hours if bus_hours else 0.0
+    merged["parallelization_unit"] = "bus"
+    merged["worker_count"] = len(worker_stats)
+    merged["total_full_year_runtime_seconds"] = runtime_seconds
+    output_path.write_text(
+        json.dumps(merged, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _write_rows(path: Path, rows: Sequence[dict[str, object]], fieldnames: Sequence[str]) -> None:
@@ -683,7 +746,14 @@ def _qsts_resize(args: argparse.Namespace) -> int:
                     scenario_id,
                 ),
             )
-            rows.append(_resize_result_row(result, scenario_dir, args.requested_mw))
+            rows.append(
+                _resize_result_row(
+                    result,
+                    scenario_dir,
+                    args.requested_mw,
+                    selected_policy=args.selected_policy,
+                )
+            )
     except (ImportError, ValueError) as exc:
         print(f"qsts-resize error: {exc}")
         return 2
@@ -1008,7 +1078,13 @@ def _resize_mw_values(requested_mw: float, min_mw: float, step_mw: float) -> lis
     return values
 
 
-def _resize_result_row(result, scenario_dir: Path, original_requested_mw: float) -> dict[str, object]:
+def _resize_result_row(
+    result,
+    scenario_dir: Path,
+    original_requested_mw: float,
+    *,
+    selected_policy: str,
+) -> dict[str, object]:
     if not result.buses:
         raise ValueError("qsts-resize scenario returned no bus results")
     bus = result.buses[0]
@@ -1018,8 +1094,11 @@ def _resize_result_row(result, scenario_dir: Path, original_requested_mw: float)
         mwh_tolerance=result.request.expected_curtailment_tolerance_mwh,
     )
     economics = _qsts_economics_proxy(result)
-    policy_verdicts = _resize_policy_verdicts(result.request, bus)
-    selected_policy = "standard"
+    policy_verdicts = _resize_policy_verdicts(
+        result.request,
+        bus,
+        evaluated_time_steps=result.performance.evaluated_time_steps,
+    )
     selected_policy_verdict = policy_verdicts.get(selected_policy, bus.qsts_verdict)
     product_decision = _resize_product_decision(
         selected_policy_verdict,
@@ -1066,7 +1145,11 @@ def _resize_acceptable(qsts_verdict: str) -> bool:
     return qsts_verdict in {"go", "go-with-conditions"}
 
 
-def _resize_policy_verdicts(request: QstsRequest, bus: object) -> dict[str, str]:
+def _resize_policy_verdicts(
+    request: QstsRequest,
+    bus: object,
+    evaluated_time_steps: int | None,
+) -> dict[str, str]:
     max_event_hours, max_event_mwh = _bus_max_curtailment_event(bus)
     rows = decision_frontier_rows(
         bus_id=bus.bus_id,
@@ -1077,7 +1160,7 @@ def _resize_policy_verdicts(request: QstsRequest, bus: object) -> dict[str, str]
         curtailment_energy_ratio=bus.curtailment_energy_ratio,
         max_event_hours=max_event_hours,
         max_event_mwh=max_event_mwh,
-        validation_level=_validation_level(request),
+        validation_level=_validation_level(request, evaluated_time_steps),
     )
     return {row.policy: row.frontier_verdict for row in rows}
 
@@ -1136,19 +1219,23 @@ def _render_resize_summary(
     if recommended is None:
         recommendation = (
             f"Bus {bus_id} is not acceptable at {original_requested_mw:.3f} MW and no "
-            "tested lower MW met the configured QSTS tolerances."
+            "tested lower MW met the selected decision-frontier policy."
         )
         recommended_line = "- recommended_resized_mw: none"
     else:
         recommended_mw = float(str(recommended["requested_mw"]))
         delta_mw = float(str(recommended["delta_mw_from_original"]))
+        selected_policy = str(recommended["selected_policy"])
+        selected_policy_verdict = str(recommended[f"{selected_policy}_policy_verdict"])
         recommendation = (
             f"Bus {bus_id} is not acceptable at {original_requested_mw:.3f} MW, but is "
-            f"acceptable at {recommended_mw:.3f} MW with verdict "
-            f"`{recommended['qsts_verdict']}`."
+            f"acceptable at {recommended_mw:.3f} MW under selected policy "
+            f"`{selected_policy}` with policy verdict `{selected_policy_verdict}`."
         )
         recommended_line = (
             f"- product_decision: {recommended['product_decision']}\n"
+            f"- selected_policy: {selected_policy}\n"
+            f"- selected_policy_verdict: {selected_policy_verdict}\n"
             f"- recommended_resized_mw: {recommended_mw:.3f}\n"
             f"- delta_mw_from_original: {delta_mw:.3f}\n"
             f"- delta_npv_eur: {float(str(recommended['delta_npv_eur'])):.2f}"

@@ -69,8 +69,8 @@ The first QSTS workflow validates top-ranked BESS candidates from a screening CS
    curtailed MW, raw binding constraint, and incremental binding constraint.
 7. Summarize the worst directional curtailment per timestamp as QSTS expected hours,
    MWh, P50, P90, P95, P99, max MW, and maximum consecutive curtailment event.
-8. Classify `go-with-conditions` only when QSTS P90 curtailed MW and expected curtailed
-   MWh are within the configured QSTS curtailment tolerances.
+8. Keep the legacy QSTS verdict for compatibility, but use the decision-frontier policy
+   verdicts as the investor-facing decision layer.
 9. Use stratified QSTS sampling for bounded annual campaigns when full-year validation is
    not yet practical, so samples cover month and contractual time-block diversity instead
    of aliasing to a single hour of day.
