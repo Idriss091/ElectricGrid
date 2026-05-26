@@ -1,5 +1,8 @@
 import csv
 import json
+import sys
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
@@ -14,8 +17,12 @@ from thesegrid.qsts import (
     QstsRequest,
     QstsResult,
     _decision_confidence,
+    _datetime_from_record_timestamp,
+    _max_curtailment_event,
     _qsts_economics_proxy,
+    _run_pandapower_power_flow,
     _profile_time_steps,
+    _time_step_weights,
     _recommended_next_action,
     _qsts_verdict,
     _validation_level,
@@ -157,6 +164,34 @@ def test_compare_qsts_envelopes_includes_static_rte_and_qsts_options(tmp_path):
     assert qsts.p90_curtailment_mw > 0.0
 
 
+def test_datetime_from_record_timestamp_maps_integer_hour_without_annual_scan(monkeypatch):
+    def fail_annual_timestamps(_year):
+        raise AssertionError("annual_timestamps should not be called for numeric QSTS timestamps")
+
+    monkeypatch.setattr("thesegrid.qsts.annual_timestamps", fail_annual_timestamps)
+
+    timestamp = _datetime_from_record_timestamp("333")
+
+    assert timestamp == datetime(2026, 1, 14, 21)
+
+
+def test_max_curtailment_event_treats_integer_timestamps_as_hour_indices():
+    frame = pd.DataFrame(
+        [
+            {"timestamp": "0", "curtailed_mw": 1.0},
+            {"timestamp": "1", "curtailed_mw": 2.0},
+            {"timestamp": "2", "curtailed_mw": 0.0},
+            {"timestamp": "3", "curtailed_mw": 4.0},
+            {"timestamp": "4", "curtailed_mw": 5.0},
+        ]
+    )
+
+    max_hours, max_mwh = _max_curtailment_event(frame)
+
+    assert max_hours == 2
+    assert max_mwh == 9.0
+
+
 def test_qsts_verdict_requires_explicit_p90_and_mwh_tolerance_for_conditions():
     curtailment = CurtailmentEstimate(
         expected_hours=2,
@@ -210,6 +245,18 @@ def test_qsts_decision_policy_marks_short_qsts_as_non_final(tmp_path):
         _recommended_next_action("go", "no_curtailment", full_year_request, evaluated_time_steps=8784)
         == "proceed_to_investor_memo"
     )
+
+
+def test_validation_level_uses_unique_time_steps_not_bus_hours(tmp_path):
+    request = QstsRequest(
+        network_code="1-MV-rural--0-sw",
+        screening_csv=tmp_path / "screening.csv",
+        requested_mw=5.0,
+        sample_every_n_hours=1,
+    )
+
+    assert _validation_level(request, evaluated_time_steps=4380) == "qsts_short"
+    assert _decision_confidence(request, evaluated_time_steps=4380) == "low"
 
 
 def test_qsts_decision_policy_flags_p90_zero_mwh_tail_risk(tmp_path):
@@ -330,6 +377,34 @@ def test_profile_time_steps_can_use_stratified_sampling_across_time_blocks():
     assert len(steps) == 84
     assert len(steps) == len(set(steps))
     assert {step % 24 for step in steps} == {0, 7, 10, 13, 17, 18, 21}
+
+
+def test_stratified_time_step_weights_annualize_month_time_blocks(tmp_path):
+    request = QstsRequest(
+        network_code="1-MV-rural--0-sw",
+        screening_csv=tmp_path / "screening.csv",
+        requested_mw=5.0,
+        stratified_sample=True,
+        duration_hours=8760,
+    )
+    profiles = {
+        "load_p": pd.DataFrame({0: [0.0] * 8760}),
+        "load_q": pd.DataFrame(),
+        "sgen_p": pd.DataFrame(),
+        "sgen_q": pd.DataFrame(),
+        "gen_p": pd.DataFrame(),
+        "storage_p": pd.DataFrame(),
+    }
+    steps = _profile_time_steps(profiles, stratified_sample=True)
+
+    weights = _time_step_weights(steps, request, available_hours=8760)
+
+    assert len(weights) == 84
+    assert sum(weights.values()) == 8760.0
+    assert weights[0] == 31 * 7
+    assert weights[7] == 31 * 3
+    assert weights[10] == 31 * 3
+    assert weights[21] == 31 * 3
 
 
 def test_classify_incremental_violations_ignores_pre_existing_unworsened_violation():
@@ -786,6 +861,131 @@ def test_cli_qsts_accepts_progress_and_economics_options(tmp_path, monkeypatch):
     assert request.discount_rate == 0.08
 
 
+def test_run_pandapower_power_flow_passes_configured_solver_options(monkeypatch):
+    captured = {}
+
+    def fake_runpp(_net, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "pandapower", SimpleNamespace(runpp=fake_runpp))
+    request = QstsRequest(
+        network_code="1-MV-rural--0-sw",
+        screening_csv=Path("screening.csv"),
+        requested_mw=5.0,
+        pf_numba=True,
+        pf_algorithm="bfsw",
+        pf_init="results",
+        pf_recycle=True,
+    )
+
+    _run_pandapower_power_flow(SimpleNamespace(), request)
+
+    assert captured["numba"] is True
+    assert captured["algorithm"] == "bfsw"
+    assert captured["init"] == "results"
+    assert captured["recycle"] == {"bus_pq": True, "trafo": False, "gen": False}
+
+
+def test_qsts_benchmark_cli_writes_perf_csv(tmp_path, monkeypatch):
+    screening_csv = tmp_path / "screening.csv"
+    _write_screening_csv(
+        screening_csv,
+        [
+            {"rank": "1", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+        ],
+    )
+
+    def fake_run_qsts(request, settings=None):
+        result = _sample_qsts_result_for_request(request, verdict="go")
+        return QstsResult(
+            request=result.request,
+            buses=result.buses,
+            settings=settings,
+            performance=result.performance,
+        )
+
+    monkeypatch.setattr("thesegrid.cli.run_qsts", fake_run_qsts)
+    output = tmp_path / "benchmark"
+
+    exit_code = main(
+        [
+            "qsts-benchmark",
+            "--network",
+            "1-MV-rural--0-sw",
+            "--screening-csv",
+            str(screening_csv),
+            "--requested-mw",
+            "1",
+            "--bus-ids",
+            "1",
+            "--duration-hours",
+            "24",
+            "--pf-numba",
+            "--pf-algorithm",
+            "bfsw",
+            "--pf-init",
+            "results",
+            "--pf-recycle",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    rows = list(csv.DictReader((output / "qsts_benchmark.csv").open(encoding="utf-8")))
+    assert rows[0]["pf_numba"] == "True"
+    assert rows[0]["pf_algorithm"] == "bfsw"
+    assert rows[0]["pf_init"] == "results"
+    assert rows[0]["pf_recycle"] == "True"
+    assert (output / "qsts_benchmark.md").exists()
+
+
+def test_qsts_parallel_cli_resumes_completed_bus(tmp_path, monkeypatch):
+    screening_csv = tmp_path / "screening.csv"
+    _write_screening_csv(
+        screening_csv,
+        [
+            {"rank": "1", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+            {"rank": "2", "bus_id": "2", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+        ],
+    )
+    output = tmp_path / "parallel"
+    completed = output / "bus_1"
+    completed.mkdir(parents=True)
+    (completed / "qsts_results.csv").write_text("bus_id\n1\n", encoding="utf-8")
+    seen_bus_ids = []
+
+    def fake_run_qsts(request, settings=None):
+        del settings
+        seen_bus_ids.extend(request.bus_ids)
+        return _sample_qsts_result_for_request(request, verdict="go")
+
+    monkeypatch.setattr("thesegrid.cli.run_qsts", fake_run_qsts)
+
+    exit_code = main(
+        [
+            "qsts-parallel",
+            "--network",
+            "1-MV-rural--0-sw",
+            "--screening-csv",
+            str(screening_csv),
+            "--requested-mw",
+            "1",
+            "--bus-ids",
+            "1,2",
+            "--workers",
+            "1",
+            "--resume",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert seen_bus_ids == [2]
+    assert (output / "merged" / "qsts_results.csv").exists()
+
+
 def test_cli_qsts_sweep_writes_scenario_outputs_and_summary(tmp_path, monkeypatch):
     screening_csv = tmp_path / "screening.csv"
     _write_screening_csv(
@@ -975,6 +1175,9 @@ def test_cli_qsts_resize_recommends_largest_acceptable_mw(tmp_path, monkeypatch)
     assert "delta_npv_eur" in rows[-1]
     assert rows[-1]["requested_mw"] == "2.000000"
     assert rows[-1]["qsts_verdict"] == "go-with-conditions"
+    assert rows[-1]["legacy_qsts_verdict"] == "go-with-conditions"
+    assert rows[-1]["selected_policy"] == "standard"
+    assert rows[-1]["standard_policy_verdict"] == "go-with-conditions"
     summary = (output / "resize_summary.md").read_text(encoding="utf-8")
     assert "product_decision: resize-recommended" in summary
     assert "recommended_resized_mw: 2.000" in summary
@@ -1101,6 +1304,78 @@ def test_run_qsts_reuses_baseline_state_across_buses(tmp_path, monkeypatch):
     )
 
     assert len(calls) == 2
+
+
+def test_run_qsts_reports_time_steps_separately_from_bus_hours(tmp_path, monkeypatch):
+    screening_csv = tmp_path / "screening.csv"
+    _write_screening_csv(
+        screening_csv,
+        [
+            {"rank": "1", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+            {"rank": "2", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+            {"rank": "3", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"},
+        ],
+    )
+    net = load_network("toy")
+    profiles = {
+        "load_p": pd.DataFrame({0: [0.1] * 24}),
+        "load_q": pd.DataFrame({0: [0.01] * 24}),
+        "sgen_p": pd.DataFrame(),
+        "sgen_q": pd.DataFrame(),
+        "gen_p": pd.DataFrame(),
+        "storage_p": pd.DataFrame(),
+    }
+
+    monkeypatch.setattr("thesegrid.qsts.load_network", lambda _network_code: net)
+    monkeypatch.setattr("thesegrid.qsts.load_simbench_power_profiles", lambda _net: profiles)
+
+    result = run_qsts(
+        QstsRequest(
+            network_code="1-MV-rural--0-sw",
+            screening_csv=screening_csv,
+            requested_mw=0.5,
+            top_n=3,
+            duration_hours=24,
+        )
+    )
+
+    assert result.performance.evaluated_time_steps == 24
+    assert result.performance.evaluated_buses == 3
+    assert result.performance.evaluated_bus_hours == 72
+    assert _validation_level(result.request, result.performance.evaluated_time_steps) == "qsts_short"
+
+
+def test_qsts_outputs_include_weighted_risk_economics_and_frontier(tmp_path):
+    result = _sample_qsts_result(tmp_path)
+
+    outputs = write_qsts_outputs(result, tmp_path / "qsts")
+
+    assert outputs.economics_csv_path.exists()
+    assert outputs.decision_frontier_csv_path.exists()
+    with outputs.results_csv_path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    assert rows[0]["sampled_curtailment_mwh"] == "2.000000"
+    assert rows[0]["weighted_curtailment_mwh"] == "2.000000"
+    assert rows[0]["curtailment_energy_ratio"] == "0.000046"
+    with outputs.economics_csv_path.open(newline="", encoding="utf-8") as handle:
+        economics_rows = list(csv.DictReader(handle))
+    assert economics_rows[0]["bus_id"] == "21"
+    assert "delta_npv_eur" in economics_rows[0]
+    with outputs.decision_frontier_csv_path.open(newline="", encoding="utf-8") as handle:
+        frontier_rows = list(csv.DictReader(handle))
+    assert {row["policy"] for row in frontier_rows} == {
+        "strict",
+        "standard",
+        "flexible",
+        "aggressive",
+    }
+    assert "p90_curtailment_ratio" in frontier_rows[0]
+    assert "max_event_hours" in frontier_rows[0]
+    assert "max_event_mwh_per_mw" in frontier_rows[0]
+    assert frontier_rows[0]["validation_level"] == "qsts_short"
+    manifest = json.loads(outputs.run_manifest_path.read_text(encoding="utf-8"))
+    assert manifest["outputs"]["qsts_economics"] == "qsts_economics.csv"
+    assert manifest["outputs"]["decision_frontier"] == "decision_frontier.csv"
 
 
 def _sample_qsts_result(tmp_path):

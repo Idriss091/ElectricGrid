@@ -6,6 +6,7 @@ import itertools
 import json
 import re
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
@@ -20,9 +21,11 @@ from thesegrid.full_year_selection import (
 )
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
+from thesegrid.decision_frontier import decision_frontier_rows
 from thesegrid.qsts import (
     QstsRequest,
     _decision_confidence,
+    _bus_max_curtailment_event,
     _qsts_economics_proxy,
     _qsts_verdict_driver,
     _recommended_next_action,
@@ -44,6 +47,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _screen(args)
     if args.command == "qsts":
         return _qsts(args)
+    if args.command == "qsts-benchmark":
+        return _qsts_benchmark(args)
+    if args.command == "qsts-parallel":
+        return _qsts_parallel(args)
     if args.command == "qsts-resize":
         return _qsts_resize(args)
     if args.command == "qsts-sweep":
@@ -184,6 +191,25 @@ def _build_parser() -> argparse.ArgumentParser:
     qsts.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
     qsts.add_argument("--reinforcement-wait-years", type=float, default=5.0)
     qsts.add_argument("--discount-rate", type=float, default=0.08)
+    _add_power_flow_options(qsts)
+    benchmark = subparsers.add_parser(
+        "qsts-benchmark",
+        help="Run a small QSTS scenario and write reproducible performance metrics",
+    )
+    _add_qsts_common_arguments(benchmark)
+    _add_power_flow_options(benchmark)
+    parallel = subparsers.add_parser(
+        "qsts-parallel",
+        help="Run QSTS one bus per worker and merge qsts_results.csv outputs",
+    )
+    _add_qsts_common_arguments(parallel)
+    _add_power_flow_options(parallel)
+    parallel.add_argument("--workers", type=int, default=1, help="Parallel bus workers")
+    parallel.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip bus_N workers that already contain qsts_results.csv",
+    )
     resize = subparsers.add_parser(
         "qsts-resize",
         help="Find the largest QSTS-acceptable resized MW for one bus",
@@ -213,6 +239,7 @@ def _build_parser() -> argparse.ArgumentParser:
     resize.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
     resize.add_argument("--reinforcement-wait-years", type=float, default=5.0)
     resize.add_argument("--discount-rate", type=float, default=0.08)
+    _add_power_flow_options(resize)
     sweep = subparsers.add_parser("qsts-sweep", help="Run a QSTS sensitivity sweep from JSON")
     sweep.add_argument("--config", required=True, type=Path, help="Sweep JSON config path")
     sweep.add_argument("--output", required=True, type=Path, help="Output directory")
@@ -235,6 +262,19 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="+",
         help="One or more full-year QSTS results CSV paths",
     )
+    compare.add_argument(
+        "--decision-frontier",
+        type=Path,
+        nargs="*",
+        default=(),
+        help="Optional decision_frontier.csv files used for policy-based final decisions",
+    )
+    compare.add_argument(
+        "--selected-policy",
+        default="standard",
+        choices=["strict", "standard", "flexible", "aggressive"],
+        help="Policy used as final_decision when decision frontier rows are available",
+    )
     compare.add_argument("--output", required=True, type=Path, help="Output directory")
     select_full_year = subparsers.add_parser(
         "select-full-year-candidates",
@@ -255,6 +295,57 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     bundle.add_argument("--bundle", required=True, type=Path, help="Investor bundle directory")
     return parser
+
+
+def _add_qsts_common_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--network", required=True, help="SimBench code; 'toy' is refused for QSTS")
+    parser.add_argument("--screening-csv", required=True, type=Path, help="Input screening.csv path")
+    parser.add_argument("--requested-mw", required=True, type=float, help="Requested BESS MW")
+    parser.add_argument("--output", type=Path, required=True, help="Output directory")
+    parser.add_argument("--top-n", type=int, default=10, help="Top screening rows to validate")
+    parser.add_argument(
+        "--bus-ids",
+        help="Comma-separated screening bus IDs to validate; overrides --top-n selection",
+    )
+    parser.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
+    parser.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
+    parser.add_argument("--duration-hours", type=int, help="Number of hourly profile steps to validate")
+    parser.add_argument("--sample-every-n-hours", type=int, default=1)
+    parser.add_argument("--stratified-sample", action="store_true")
+    parser.add_argument("--voltage-min-pu", type=float, default=0.95)
+    parser.add_argument("--voltage-max-pu", type=float, default=1.05)
+    parser.add_argument("--max-loading-percent", type=float, default=100.0)
+    parser.add_argument("--p90-curtailment-tolerance-mw", type=float, default=0.0)
+    parser.add_argument("--expected-curtailment-tolerance-mwh", type=float, default=0.0)
+    parser.add_argument("--progress-every-n-hours", type=int, default=250)
+    parser.add_argument("--storage-duration-hours", type=float, default=4.0)
+    parser.add_argument("--capex-eur-per-kw", type=float, default=0.0)
+    parser.add_argument("--fixed-opex-eur-per-kw-year", type=float, default=0.0)
+    parser.add_argument("--gross-revenue-eur-per-mw-year", type=float, default=0.0)
+    parser.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
+    parser.add_argument("--reinforcement-wait-years", type=float, default=5.0)
+    parser.add_argument("--discount-rate", type=float, default=0.08)
+
+
+def _add_power_flow_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--pf-numba", action="store_true", help="Enable pandapower runpp numba")
+    parser.add_argument(
+        "--pf-algorithm",
+        default="nr",
+        choices=["nr", "iwamoto_nr", "bfsw", "gs", "fdbx", "fdxb"],
+        help="pandapower runpp algorithm",
+    )
+    parser.add_argument(
+        "--pf-init",
+        default="auto",
+        choices=["auto", "flat", "dc", "results"],
+        help="pandapower runpp initialization mode",
+    )
+    parser.add_argument(
+        "--pf-recycle",
+        action="store_true",
+        help="Enable conservative pandapower runpp recycling for repeated QSTS power flows",
+    )
 
 
 def _assess(args: argparse.Namespace) -> int:
@@ -312,33 +403,8 @@ def _screen(args: argparse.Namespace) -> int:
 
 def _qsts(args: argparse.Namespace) -> int:
     try:
-        request = QstsRequest(
-            network_code=args.network,
-            screening_csv=args.screening_csv,
-            requested_mw=args.requested_mw,
-            top_n=args.top_n,
-            bus_ids=_parse_bus_ids(args.bus_ids),
-            asset=args.asset,
-            start_hour=args.start_hour,
-            duration_hours=args.duration_hours,
-            sample_every_n_hours=args.sample_every_n_hours,
-            stratified_sample=args.stratified_sample,
-            progress_every_n_hours=args.progress_every_n_hours,
-            p90_curtailment_tolerance_mw=args.p90_curtailment_tolerance_mw,
-            expected_curtailment_tolerance_mwh=args.expected_curtailment_tolerance_mwh,
-            storage_duration_hours=args.storage_duration_hours,
-            capex_eur_per_kw=args.capex_eur_per_kw,
-            fixed_opex_eur_per_kw_year=args.fixed_opex_eur_per_kw_year,
-            gross_revenue_eur_per_mw_year=args.gross_revenue_eur_per_mw_year,
-            curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
-            reinforcement_wait_years=args.reinforcement_wait_years,
-            discount_rate=args.discount_rate,
-        )
-        settings = ConstraintSettings(
-            min_vm_pu=args.voltage_min_pu,
-            max_vm_pu=args.voltage_max_pu,
-            max_loading_percent=args.max_loading_percent,
-        )
+        request = _qsts_request_from_args(args)
+        settings = _constraint_settings_from_args(args)
         if request.bus_ids:
             print(f"validating {len(request.bus_ids)} forced buses with QSTS...", file=sys.stderr)
         else:
@@ -350,6 +416,215 @@ def _qsts(args: argparse.Namespace) -> int:
     outputs = write_qsts_outputs(result, args.output, command=args._argv)
     print(f"qsts validated {len(result.buses)} buses: {outputs.results_csv_path} {outputs.summary_path}")
     return 0
+
+
+def _qsts_benchmark(args: argparse.Namespace) -> int:
+    try:
+        request = _qsts_request_from_args(args)
+        settings = _constraint_settings_from_args(args)
+        result = run_qsts(request, settings=settings)
+    except (ImportError, ValueError) as exc:
+        print(f"qsts-benchmark error: {exc}")
+        return 2
+    args.output.mkdir(parents=True, exist_ok=True)
+    write_qsts_outputs(result, args.output / "qsts_output", command=args._argv)
+    csv_path = args.output / "qsts_benchmark.csv"
+    row = _qsts_benchmark_row(result)
+    _write_rows(csv_path, [row], row.keys())
+    markdown_path = args.output / "qsts_benchmark.md"
+    markdown_path.write_text(_render_qsts_benchmark_markdown(row), encoding="utf-8")
+    print(f"qsts benchmark: {csv_path} {markdown_path}")
+    return 0
+
+
+def _qsts_parallel(args: argparse.Namespace) -> int:
+    try:
+        request = _qsts_request_from_args(args)
+        settings = _constraint_settings_from_args(args)
+        if not request.bus_ids:
+            raise ValueError("qsts-parallel requires --bus-ids for explicit worker outputs")
+        if args.workers <= 0:
+            raise ValueError("--workers must be positive")
+    except ValueError as exc:
+        print(f"qsts-parallel error: {exc}")
+        return 2
+
+    args.output.mkdir(parents=True, exist_ok=True)
+    worker_specs = [
+        (bus_id, args.output / f"bus_{bus_id}")
+        for bus_id in request.bus_ids
+        if not (args.resume and (args.output / f"bus_{bus_id}" / "qsts_results.csv").exists())
+    ]
+    completed_dirs = [args.output / f"bus_{bus_id}" for bus_id in request.bus_ids]
+    try:
+        if args.workers == 1:
+            for bus_id, output_dir in worker_specs:
+                _run_qsts_worker(request, settings, bus_id, output_dir, args._argv)
+        else:
+            with ProcessPoolExecutor(max_workers=args.workers) as executor:
+                futures = [
+                    executor.submit(_run_qsts_worker, request, settings, bus_id, output_dir, args._argv)
+                    for bus_id, output_dir in worker_specs
+                ]
+                for future in as_completed(futures):
+                    future.result()
+    except (ImportError, ValueError) as exc:
+        print(f"qsts-parallel error: {exc}")
+        return 2
+
+    merged_dir = args.output / "merged"
+    _merge_qsts_worker_outputs(completed_dirs, merged_dir)
+    print(f"qsts-parallel completed {len(worker_specs)} workers: {merged_dir / 'qsts_results.csv'}")
+    return 0
+
+
+def _qsts_request_from_args(
+    args: argparse.Namespace,
+    *,
+    bus_ids: tuple[int, ...] | None = None,
+    requested_mw: float | None = None,
+) -> QstsRequest:
+    return QstsRequest(
+        network_code=args.network,
+        screening_csv=args.screening_csv,
+        requested_mw=args.requested_mw if requested_mw is None else requested_mw,
+        top_n=args.top_n,
+        bus_ids=_parse_bus_ids(args.bus_ids) if bus_ids is None else bus_ids,
+        asset=args.asset,
+        start_hour=args.start_hour,
+        duration_hours=args.duration_hours,
+        sample_every_n_hours=args.sample_every_n_hours,
+        stratified_sample=args.stratified_sample,
+        progress_every_n_hours=args.progress_every_n_hours,
+        p90_curtailment_tolerance_mw=args.p90_curtailment_tolerance_mw,
+        expected_curtailment_tolerance_mwh=args.expected_curtailment_tolerance_mwh,
+        storage_duration_hours=args.storage_duration_hours,
+        capex_eur_per_kw=args.capex_eur_per_kw,
+        fixed_opex_eur_per_kw_year=args.fixed_opex_eur_per_kw_year,
+        gross_revenue_eur_per_mw_year=args.gross_revenue_eur_per_mw_year,
+        curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
+        reinforcement_wait_years=args.reinforcement_wait_years,
+        discount_rate=args.discount_rate,
+        pf_numba=args.pf_numba,
+        pf_algorithm=args.pf_algorithm,
+        pf_init=args.pf_init,
+        pf_recycle=args.pf_recycle,
+    )
+
+
+def _constraint_settings_from_args(args: argparse.Namespace) -> ConstraintSettings:
+    return ConstraintSettings(
+        min_vm_pu=args.voltage_min_pu,
+        max_vm_pu=args.voltage_max_pu,
+        max_loading_percent=args.max_loading_percent,
+    )
+
+
+def _run_qsts_worker(
+    base_request: QstsRequest,
+    settings: ConstraintSettings,
+    bus_id: int,
+    output_dir: Path,
+    command: Sequence[str],
+) -> str:
+    request = QstsRequest(
+        **{
+            **base_request.__dict__,
+            "bus_ids": (bus_id,),
+            "top_n": 1,
+            "progress_every_n_hours": 0,
+        }
+    )
+    result = run_qsts(request, settings=settings)
+    write_qsts_outputs(result, output_dir, command=tuple(command) + ("--worker-bus-id", str(bus_id)))
+    return output_dir.as_posix()
+
+
+def _merge_qsts_worker_outputs(worker_dirs: Sequence[Path], output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for filename in (
+        "qsts_results.csv",
+        "decision_frontier.csv",
+        "qsts_economics.csv",
+        "qsts_risk_summary.csv",
+    ):
+        _merge_csv_files([worker_dir / filename for worker_dir in worker_dirs], output_dir / filename)
+    manifest_path = output_dir / "parallel_manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "qsts-parallel-merge-v1",
+                "generated_at_utc": datetime.now(UTC).isoformat(),
+                "worker_dirs": [worker_dir.as_posix() for worker_dir in worker_dirs],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _merge_csv_files(input_paths: Sequence[Path], output_path: Path) -> None:
+    fieldnames: list[str] | None = None
+    rows: list[dict[str, str]] = []
+    for path in input_paths:
+        if not path.exists():
+            continue
+        with path.open(encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None:
+                continue
+            if fieldnames is None:
+                fieldnames = list(reader.fieldnames)
+            rows.extend({key: row.get(key, "") for key in fieldnames} for row in reader)
+    if fieldnames is None:
+        output_path.write_text("", encoding="utf-8")
+        return
+    _write_rows(output_path, rows, fieldnames)
+
+
+def _write_rows(path: Path, rows: Sequence[dict[str, object]], fieldnames: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _qsts_benchmark_row(result) -> dict[str, object]:
+    request = result.request
+    performance = result.performance
+    return {
+        "network_code": request.network_code,
+        "requested_mw": f"{request.requested_mw:.6f}",
+        "bus_ids": ",".join(str(bus_id) for bus_id in request.bus_ids),
+        "duration_hours": "" if request.duration_hours is None else str(request.duration_hours),
+        "stratified_sample": str(request.stratified_sample),
+        "pf_numba": str(request.pf_numba),
+        "pf_algorithm": request.pf_algorithm,
+        "pf_init": request.pf_init,
+        "pf_recycle": str(request.pf_recycle),
+        "evaluated_time_steps": performance.evaluated_time_steps,
+        "evaluated_buses": performance.evaluated_buses,
+        "evaluated_bus_hours": performance.evaluated_bus_hours,
+        "power_flow_calls": performance.power_flow_calls,
+        "power_flow_calls_per_bus_hour": f"{performance.power_flow_calls_per_bus_hour:.6f}",
+        "runtime_seconds": f"{performance.runtime_seconds:.6f}",
+        "runtime_seconds_per_bus_hour": f"{performance.runtime_seconds_per_bus_hour:.6f}",
+    }
+
+
+def _render_qsts_benchmark_markdown(row: dict[str, object]) -> str:
+    lines = [
+        "# QSTS Benchmark",
+        "",
+        "| metric | value |",
+        "| --- | ---: |",
+    ]
+    for key, value in row.items():
+        lines.append(f"| {key} | {value} |")
+    return "\n".join(lines) + "\n"
 
 
 def _qsts_resize(args: argparse.Namespace) -> int:
@@ -386,6 +661,10 @@ def _qsts_resize(args: argparse.Namespace) -> int:
                 curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
                 reinforcement_wait_years=args.reinforcement_wait_years,
                 discount_rate=args.discount_rate,
+                pf_numba=args.pf_numba,
+                pf_algorithm=args.pf_algorithm,
+                pf_init=args.pf_init,
+                pf_recycle=args.pf_recycle,
             )
             print(
                 f"qsts-resize validating bus {args.bus_id} at {requested_mw:.3f} MW "
@@ -503,6 +782,8 @@ def _compare_validation(args: argparse.Namespace) -> int:
         qsts_short_csv=args.qsts_short,
         qsts_stratified_csv=args.qsts_stratified,
         qsts_full_year_csvs=tuple(args.qsts_full_year),
+        decision_frontier_csvs=tuple(args.decision_frontier),
+        selected_policy=args.selected_policy,
     )
     outputs = write_validation_matrix_outputs(matrix, args.output)
     print(f"validation matrix: {outputs.csv_path} {outputs.markdown_path}")
@@ -737,8 +1018,11 @@ def _resize_result_row(result, scenario_dir: Path, original_requested_mw: float)
         mwh_tolerance=result.request.expected_curtailment_tolerance_mwh,
     )
     economics = _qsts_economics_proxy(result)
+    policy_verdicts = _resize_policy_verdicts(result.request, bus)
+    selected_policy = "standard"
+    selected_policy_verdict = policy_verdicts.get(selected_policy, bus.qsts_verdict)
     product_decision = _resize_product_decision(
-        bus.qsts_verdict,
+        selected_policy_verdict,
         requested_mw=result.request.requested_mw,
         original_requested_mw=original_requested_mw,
     )
@@ -749,8 +1033,14 @@ def _resize_result_row(result, scenario_dir: Path, original_requested_mw: float)
         "bus_id": bus.bus_id,
         "bus_name": bus.bus_name,
         "qsts_verdict": bus.qsts_verdict,
+        "legacy_qsts_verdict": bus.qsts_verdict,
+        "selected_policy": selected_policy,
+        "strict_policy_verdict": policy_verdicts.get("strict", ""),
+        "standard_policy_verdict": policy_verdicts.get("standard", ""),
+        "flexible_policy_verdict": policy_verdicts.get("flexible", ""),
+        "aggressive_policy_verdict": policy_verdicts.get("aggressive", ""),
         "product_decision": product_decision,
-        "acceptable": str(_resize_acceptable(bus.qsts_verdict)),
+        "acceptable": str(_resize_acceptable(selected_policy_verdict)),
         "validation_level": _validation_level(result.request, result.performance.evaluated_time_steps),
         "decision_confidence": _decision_confidence(
             result.request,
@@ -776,6 +1066,22 @@ def _resize_acceptable(qsts_verdict: str) -> bool:
     return qsts_verdict in {"go", "go-with-conditions"}
 
 
+def _resize_policy_verdicts(request: QstsRequest, bus: object) -> dict[str, str]:
+    max_event_hours, max_event_mwh = _bus_max_curtailment_event(bus)
+    rows = decision_frontier_rows(
+        bus_id=bus.bus_id,
+        bus_name=bus.bus_name,
+        requested_mw=bus.requested_mw,
+        qsts_p90_mw=bus.curtailment.p90_mw,
+        weighted_curtailment_mwh=bus.weighted_curtailment_mwh,
+        curtailment_energy_ratio=bus.curtailment_energy_ratio,
+        max_event_hours=max_event_hours,
+        max_event_mwh=max_event_mwh,
+        validation_level=_validation_level(request),
+    )
+    return {row.policy: row.frontier_verdict for row in rows}
+
+
 def _resize_product_decision(
     qsts_verdict: str,
     requested_mw: float,
@@ -796,6 +1102,12 @@ def _write_resize_results(path: Path, rows: list[dict[str, object]]) -> None:
         "bus_id",
         "bus_name",
         "qsts_verdict",
+        "legacy_qsts_verdict",
+        "selected_policy",
+        "strict_policy_verdict",
+        "standard_policy_verdict",
+        "flexible_policy_verdict",
+        "aggressive_policy_verdict",
         "product_decision",
         "acceptable",
         "validation_level",

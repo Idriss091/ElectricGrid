@@ -214,6 +214,49 @@ def test_render_bundle_html_includes_decision_frontier_for_full_year_rows(tmp_pa
     assert "aggressive" in html
 
 
+def test_render_bundle_html_prefers_decision_frontier_csv_when_available(tmp_path):
+    bundle = _write_bundle(tmp_path)
+    _write_csv(
+        bundle / "decision_frontier.csv",
+        [
+            "bus_id",
+            "bus_name",
+            "policy",
+            "qsts_p90_mw",
+            "p90_curtailment_ratio",
+            "weighted_curtailment_mwh",
+            "curtailment_energy_ratio",
+            "max_event_hours",
+            "max_event_mwh",
+            "max_event_mwh_per_mw",
+            "frontier_verdict",
+            "validation_level",
+        ],
+        [
+            {
+                "bus_id": "21",
+                "bus_name": "MV bus 21",
+                "policy": "standard",
+                "qsts_p90_mw": "0.187500",
+                "p90_curtailment_ratio": "0.062500",
+                "weighted_curtailment_mwh": "656.109375",
+                "curtailment_energy_ratio": "0.024966",
+                "max_event_hours": "24",
+                "max_event_mwh": "12.000000",
+                "max_event_mwh_per_mw": "4.000000",
+                "frontier_verdict": "no-go",
+                "validation_level": "qsts_full_year",
+            }
+        ],
+    )
+
+    html = render_bundle_html(bundle)
+
+    assert "weighted_curtailment_mwh" in html
+    assert "656.109375" in html
+    assert "qsts_full_year" in html
+
+
 def test_write_bundle_report_creates_html_scorecard_and_campaign_guide(tmp_path):
     bundle = _write_bundle(tmp_path)
 

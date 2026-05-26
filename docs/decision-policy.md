@@ -28,13 +28,32 @@ QSTS outputs now include:
 
 ## Verdict Rules
 
+`qsts_verdict` is retained as a legacy compatibility field. It uses configured absolute
+P90 MW and MWh tolerances and remains useful for diagnostics and historical comparison.
+
+The investor-facing decision should use the policy frontier when `decision_frontier.csv`
+is available. The default selected policy is `standard`.
+
+Policy verdicts are:
+
 - `go`: no QSTS curtailment was observed.
-- `go-with-conditions`: QSTS curtailment is non-zero but both P90 MW and expected MWh are
-  within configured tolerances.
-- `no-go`: P90 MW, expected MWh, or both exceed configured tolerances.
+- `go-with-conditions`: non-zero curtailment is within the selected policy limits.
+- `investigate-only`: aggressive policy is satisfied but flexible policy is exceeded.
+- `no-go`: at least one selected-policy limit is exceeded.
 
 P90 MW alone is never sufficient for an investor decision. A case with P90 = 0 MW can
 still be `no-go` if expected curtailed MWh exceeds tolerance.
+
+QSTS now distinguishes sampled and decision-weighted energy:
+
+- `sampled_curtailment_mwh`: raw curtailed MWh across evaluated timestamps.
+- `weighted_curtailment_mwh`: MWh used for the QSTS decision. Full-year and short runs
+  use 1 hour per evaluated timestamp; stratified annual samples weight each month/time
+  block to represent the year.
+- `curtailment_energy_ratio`: `weighted_curtailment_mwh / (requested_mw * 8760)`.
+
+`evaluated_time_steps` means unique timestamps. `evaluated_bus_hours` means the
+bus-time workload used for runtime and power-flow intensity metrics.
 
 ## Recommended Actions
 
@@ -64,9 +83,14 @@ Key columns:
 - `screening_verdict`: static triage verdict. It can be a false positive.
 - `qsts_short_verdict`: smoke-test verdict. It is never investor-final.
 - `qsts_stratified_verdict`: pre-demo verdict based on representative samples.
-- `qsts_full_year_verdict`: strongest MVP verdict when available.
-- `final_decision`: equals the full-year verdict when a full-year run exists; otherwise
-  `requires_full_year_validation`.
+- `qsts_full_year_verdict`: legacy full-year QSTS verdict when available.
+- `legacy_qsts_full_year_verdict`: explicit alias for the legacy verdict.
+- `selected_policy`: policy used for the investor-facing final decision, default
+  `standard`.
+- `standard_policy_verdict` and `flexible_policy_verdict`: policy frontier verdicts
+  used to show commercial risk appetite.
+- `final_decision`: equals the selected-policy verdict when frontier rows are provided;
+  otherwise falls back to the legacy full-year verdict or `requires_full_year_validation`.
 - `calibration_status`: explains whether the early evidence was confirmed, changed, or
   still lacks full-year validation.
 

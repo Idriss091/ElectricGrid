@@ -83,6 +83,85 @@ def test_validation_matrix_uses_full_year_as_final_decision_and_marks_false_posi
     assert bus21.calibration_status == "requires_full_year_validation"
 
 
+def test_validation_matrix_prefers_weighted_qsts_mwh_when_available(tmp_path):
+    screening = tmp_path / "screening.csv"
+    qsts_short = tmp_path / "qsts_short.csv"
+    qsts_stratified = tmp_path / "qsts_stratified.csv"
+    _write_screening(screening)
+    _write_qsts(qsts_short, [_qsts_row(21, "go", "qsts_short", "low", "run_full_year_validation", 0.0, 0.0)])
+    _write_qsts(
+        qsts_stratified,
+        [
+            {
+                **_qsts_row(
+                    21,
+                    "no-go",
+                    "qsts_stratified",
+                    "medium",
+                    "resize_or_run_full_year_validation",
+                    2.1,
+                    165.0,
+                ),
+                "weighted_curtailment_mwh": "17614.000000",
+            }
+        ],
+    )
+
+    matrix = build_validation_matrix(
+        screening_csv=screening,
+        qsts_short_csv=qsts_short,
+        qsts_stratified_csv=qsts_stratified,
+        qsts_full_year_csvs=(),
+    )
+
+    row = matrix.rows[0]
+    assert row.qsts_stratified_expected_mwh == "17614.000000"
+
+
+def test_validation_matrix_uses_standard_policy_verdict_as_final_decision(tmp_path):
+    screening = tmp_path / "screening.csv"
+    qsts_full_year = tmp_path / "qsts_full_year.csv"
+    frontier = tmp_path / "decision_frontier.csv"
+    _write_screening(screening)
+    _write_qsts(
+        qsts_full_year,
+        [
+            _qsts_row(
+                2,
+                "no-go",
+                "qsts_full_year",
+                "high",
+                "reject_or_resize_connection",
+                0.0,
+                121.0,
+            )
+        ],
+    )
+    _write_frontier(
+        frontier,
+        [
+            _frontier_row(2, "strict", "no-go"),
+            _frontier_row(2, "standard", "go-with-conditions"),
+            _frontier_row(2, "flexible", "go-with-conditions"),
+            _frontier_row(2, "aggressive", "go-with-conditions"),
+        ],
+    )
+
+    matrix = build_validation_matrix(
+        screening_csv=screening,
+        qsts_full_year_csvs=(qsts_full_year,),
+        decision_frontier_csvs=(frontier,),
+    )
+
+    row = matrix.rows[0]
+    assert row.selected_policy == "standard"
+    assert row.legacy_qsts_full_year_verdict == "no-go"
+    assert row.standard_policy_verdict == "go-with-conditions"
+    assert row.flexible_policy_verdict == "go-with-conditions"
+    assert row.final_decision == "go-with-conditions"
+    assert row.calibration_status == "confirmed_full_year"
+
+
 def test_validation_matrix_outputs_csv_and_markdown(tmp_path):
     screening = tmp_path / "screening.csv"
     qsts_short = tmp_path / "qsts_short.csv"
@@ -264,11 +343,36 @@ def _write_qsts(path: Path, rows: list[dict[str, str]]) -> None:
             "recommended_next_action",
             "p90_curtailment_mw",
             "expected_curtailment_mwh",
+            "weighted_curtailment_mwh",
             "main_recurring_constraint",
         ]
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
+
+
+def _write_frontier(path: Path, rows: list[dict[str, str]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        fieldnames = [
+            "bus_id",
+            "bus_name",
+            "policy",
+            "frontier_verdict",
+            "validation_level",
+        ]
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _frontier_row(bus_id: int, policy: str, verdict: str) -> dict[str, str]:
+    return {
+        "bus_id": str(bus_id),
+        "bus_name": f"bus {bus_id}",
+        "policy": policy,
+        "frontier_verdict": verdict,
+        "validation_level": "qsts_full_year",
+    }
 
 
 def _qsts_row(

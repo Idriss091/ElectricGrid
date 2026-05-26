@@ -125,6 +125,14 @@ them to external storage or Git LFS and keep `docs/sources.md` as the index.
 - More calibrated full-year cases are needed before broad claims about stratified
   sampling reliability.
 
+## QSTS Semantics Correction
+
+QSTS performance and risk outputs distinguish unique timestamps from bus-hours:
+`evaluated_time_steps` is the timestamp count, while `evaluated_bus_hours` is the
+runtime workload. QSTS also separates raw sampled MWh from weighted MWh; stratified
+annual samples use weighted MWh for decision checks and keep sampled MWh for diagnostic
+traceability.
+
 ## Current Implementation Priorities
 
 - Keep V1 focused on BESS France and avoid broad large-load expansion before the BESS

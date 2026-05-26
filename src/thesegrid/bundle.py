@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from thesegrid.decision_frontier import DECISION_FRONTIER_POLICIES, frontier_verdict
 from thesegrid.economic_scenarios import (
     EconomicScenarioAssumptions,
     compare_economic_scenarios,
@@ -62,7 +63,10 @@ def render_bundle_scorecard(bundle_dir: Path) -> str:
     resize_recommendations = sum(
         1 for row in resize if row.get("product_decision") == "resize-recommended"
     )
-    no_go_full_year = sum(1 for row in validation if row.get("qsts_full_year_verdict") == "no-go")
+    no_go_full_year = sum(1 for row in validation if _primary_verdict(row) == "no-go")
+    legacy_no_go_full_year = sum(
+        1 for row in validation if row.get("legacy_qsts_full_year_verdict", row.get("qsts_full_year_verdict")) == "no-go"
+    )
     readiness = _readiness(total_buses, full_year_buses, resize_recommendations)
     runtime_seconds = float(performance.get("total_full_year_runtime_seconds", 0.0))
 
@@ -70,7 +74,8 @@ def render_bundle_scorecard(bundle_dir: Path) -> str:
 
 - readiness: {readiness}
 - full_year_coverage: {full_year_buses}/{total_buses} buses
-- full_year_no_go: {no_go_full_year}
+- selected_policy_no_go: {no_go_full_year}
+- legacy_qsts_full_year_no_go: {legacy_no_go_full_year}
 - false_positive_stratified: {false_positive_stratified}
 - resize_recommendations: {resize_recommendations}
 - full_year_runtime_minutes: {runtime_seconds / 60:.2f}
@@ -92,6 +97,7 @@ def render_bundle_html(bundle_dir: Path) -> str:
     full_year_conditional = _read_csv(bundle_dir / "full_year_conditional_results.csv")
     full_year_additional = _read_csv(bundle_dir / "full_year_additional_results.csv")
     full_year_checks = full_year_additional or full_year_conditional
+    decision_frontier = _read_csv(bundle_dir / "decision_frontier.csv")
     full_year_candidates = _read_csv(bundle_dir / "full_year_candidate_selection.csv")
     economic_scenarios = _economic_scenarios(bundle_dir)
     scorecard = render_bundle_scorecard(bundle_dir)
@@ -213,7 +219,7 @@ def render_bundle_html(bundle_dir: Path) -> str:
       <h3>Full-Year Conditional Checks</h3>
       {_render_full_year_conditional_checks(full_year_checks)}
       <h3>Decision Frontier</h3>
-      {_render_decision_frontier(_frontier_rows(qsts, full_year_checks))}
+      {_render_decision_frontier(decision_frontier or _frontier_rows(qsts, full_year_checks))}
       <h3>Next Full-Year Candidates</h3>
       {_render_next_full_year_candidates(full_year_candidates)}
     </section>
@@ -230,6 +236,8 @@ def render_bundle_html(bundle_dir: Path) -> str:
         {_artifact_link("validation_matrix.csv")}
         {_artifact_link("resize_results.csv")}
         {_artifact_link("economic_scenarios.csv")}
+        {_artifact_link("qsts_economics.csv")}
+        {_artifact_link("decision_frontier.csv")}
         {_artifact_link("qsts_results.csv")}
         {_artifact_link("qsts_risk_summary.csv")}
         {_artifact_link("contractual_envelope.csv")}
@@ -290,7 +298,7 @@ def _bundle_metrics(
     performance = _read_json(bundle_dir / "qsts_performance.json")
     total_buses = len(validation)
     full_year_buses = sum(1 for row in validation if row.get("qsts_full_year_verdict"))
-    full_year_no_go = sum(1 for row in validation if row.get("qsts_full_year_verdict") == "no-go")
+    full_year_no_go = sum(1 for row in validation if _primary_verdict(row) == "no-go")
     false_positive_stratified = sum(
         1 for row in validation if row.get("calibration_status") == "false_positive_stratified"
     )
@@ -309,9 +317,13 @@ def _bundle_metrics(
 def _decision_sentence(metrics: dict[str, object]) -> str:
     return (
         f"{metrics['full_year_coverage']} have full-year evidence. "
-        f"{metrics['full_year_no_go']} buses are no-go at 5 MW, with "
+        f"{metrics['full_year_no_go']} buses are no-go under the selected policy at 5 MW, with "
         f"{metrics['resize_recommendations']} actionable resize recommendation."
     )
+
+
+def _primary_verdict(row: dict[str, str]) -> str:
+    return row.get("final_decision") or row.get("qsts_full_year_verdict", "")
 
 
 def _badge(label: str, class_name: str) -> str:
@@ -448,34 +460,6 @@ def _render_full_year_conditional_checks(rows: list[dict[str, str]]) -> str:
     return _html_table(rows)
 
 
-DECISION_POLICIES = (
-    {
-        "policy": "strict",
-        "max_p90_mw": 0.5,
-        "max_mwh": 60.0,
-        "max_energy_ratio": 0.005,
-    },
-    {
-        "policy": "standard",
-        "max_p90_mw": 1.0,
-        "max_mwh": 120.0,
-        "max_energy_ratio": 0.01,
-    },
-    {
-        "policy": "flexible",
-        "max_p90_mw": 3.0,
-        "max_mwh": 500.0,
-        "max_energy_ratio": 0.02,
-    },
-    {
-        "policy": "aggressive",
-        "max_p90_mw": 3.0,
-        "max_mwh": 1000.0,
-        "max_energy_ratio": 0.05,
-    },
-)
-
-
 def _frontier_rows(
     qsts_rows: list[dict[str, str]],
     full_year_conditional_rows: list[dict[str, str]],
@@ -491,12 +475,18 @@ def _normalize_frontier_row(row: dict[str, str]) -> dict[str, str]:
         row.get("qsts_p90_curtailment_mw") or row.get("p90_curtailment_mw")
     )
     expected_mwh = _float_or_none(
-        row.get("qsts_expected_curtailment_mwh") or row.get("expected_curtailment_mwh")
+        row.get("weighted_curtailment_mwh")
+        or row.get("qsts_expected_curtailment_mwh")
+        or row.get("expected_curtailment_mwh")
     )
     if requested_mw is None or p90_mw is None or expected_mwh is None:
         return {}
     theoretical_mwh = requested_mw * 8760.0
     energy_ratio = expected_mwh / theoretical_mwh if theoretical_mwh > 0 else 0.0
+    p90_ratio = p90_mw / requested_mw if requested_mw > 0 else 0.0
+    max_event_hours = int(float(row.get("max_event_hours") or 0))
+    max_event_mwh = _float_or_none(row.get("max_event_mwh")) or 0.0
+    max_event_mwh_per_mw = max_event_mwh / requested_mw if requested_mw > 0 else 0.0
     return {
         "bus_id": row.get("bus_id", ""),
         "bus_name": row.get("bus_name", ""),
@@ -504,18 +494,20 @@ def _normalize_frontier_row(row: dict[str, str]) -> dict[str, str]:
         "source_verdict": row.get("qsts_verdict", ""),
         "source_sampling": row.get("sampling_mode") or row.get("validation_level", ""),
         "p90_mw": f"{p90_mw:.6f}",
+        "p90_curtailment_ratio": f"{p90_ratio:.3%}",
         "expected_mwh": f"{expected_mwh:.6f}",
         "curtailment_energy_ratio": f"{energy_ratio:.3%}",
+        "max_event_hours": str(max_event_hours),
+        "max_event_mwh_per_mw": f"{max_event_mwh_per_mw:.6f}",
         **{
-            str(policy["policy"]): _policy_verdict(
-                p90_mw=p90_mw,
-                expected_mwh=expected_mwh,
-                energy_ratio=energy_ratio,
-                max_p90_mw=float(policy["max_p90_mw"]),
-                max_mwh=float(policy["max_mwh"]),
-                max_energy_ratio=float(policy["max_energy_ratio"]),
+            policy.name: frontier_verdict(
+                p90_curtailment_ratio=p90_ratio,
+                curtailment_energy_ratio=energy_ratio,
+                max_event_hours=max_event_hours,
+                max_event_mwh_per_mw=max_event_mwh_per_mw,
+                policy=policy,
             )
-            for policy in DECISION_POLICIES
+            for policy in DECISION_FRONTIER_POLICIES
         },
     }
 
@@ -541,25 +533,6 @@ def _render_next_full_year_candidates(rows: list[dict[str, str]]) -> str:
             "stratified QSTS.</p>"
         )
     return _html_table(rows)
-
-
-def _policy_verdict(
-    p90_mw: float,
-    expected_mwh: float,
-    energy_ratio: float,
-    max_p90_mw: float,
-    max_mwh: float,
-    max_energy_ratio: float,
-) -> str:
-    if p90_mw <= 1e-9 and expected_mwh <= 1e-9:
-        return "go"
-    if (
-        p90_mw <= max_p90_mw + 1e-9
-        and expected_mwh <= max_mwh + 1e-9
-        and energy_ratio <= max_energy_ratio + 1e-9
-    ):
-        return "go-with-conditions"
-    return "no-go"
 
 
 def _format_mw_header(value: float) -> str:
