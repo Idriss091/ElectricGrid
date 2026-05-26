@@ -3,14 +3,21 @@ from __future__ import annotations
 import csv
 import html
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from thesegrid.decision_frontier import DECISION_FRONTIER_POLICIES, frontier_verdict
 from thesegrid.economic_scenarios import (
     EconomicScenarioAssumptions,
     compare_economic_scenarios,
     economic_scenario_rows,
     render_economic_scenarios_markdown,
+)
+from thesegrid.gabarits import (
+    gabarit_rule_rows,
+    render_gabarit_rules_markdown,
+    rte_cre_inspired_v1_rules,
 )
 
 
@@ -21,6 +28,9 @@ class BundleReportPaths:
     campaign_guide_path: Path
     economic_csv_path: Path
     economic_markdown_path: Path
+    gabarit_csv_path: Path
+    gabarit_markdown_path: Path
+    resize_markdown_path: Path
 
 
 def write_bundle_report(bundle_dir: Path) -> BundleReportPaths:
@@ -30,10 +40,23 @@ def write_bundle_report(bundle_dir: Path) -> BundleReportPaths:
     campaign_guide_path = bundle_dir / "next_calibration_campaign.md"
     economic_csv_path = bundle_dir / "economic_scenarios.csv"
     economic_markdown_path = bundle_dir / "economic_scenarios.md"
+    gabarit_csv_path = bundle_dir / "gabarit_assumptions.csv"
+    gabarit_markdown_path = bundle_dir / "gabarit_assumptions.md"
+    resize_markdown_path = bundle_dir / "resize_recommendation.md"
     economic_scenarios = _economic_scenarios(bundle_dir)
     _write_csv(economic_csv_path, economic_scenario_rows(economic_scenarios))
     economic_markdown_path.write_text(
         render_economic_scenarios_markdown(economic_scenarios, EconomicScenarioAssumptions()),
+        encoding="utf-8",
+    )
+    gabarit_rules = rte_cre_inspired_v1_rules()
+    _write_csv(gabarit_csv_path, list(gabarit_rule_rows(gabarit_rules)))
+    gabarit_markdown_path.write_text(
+        render_gabarit_rules_markdown(gabarit_rules),
+        encoding="utf-8",
+    )
+    resize_markdown_path.write_text(
+        render_resize_recommendation_markdown(bundle_dir),
         encoding="utf-8",
     )
     html_path.write_text(render_bundle_html(bundle_dir), encoding="utf-8")
@@ -45,6 +68,9 @@ def write_bundle_report(bundle_dir: Path) -> BundleReportPaths:
         campaign_guide_path=campaign_guide_path,
         economic_csv_path=economic_csv_path,
         economic_markdown_path=economic_markdown_path,
+        gabarit_csv_path=gabarit_csv_path,
+        gabarit_markdown_path=gabarit_markdown_path,
+        resize_markdown_path=resize_markdown_path,
     )
 
 
@@ -62,17 +88,24 @@ def render_bundle_scorecard(bundle_dir: Path) -> str:
     resize_recommendations = sum(
         1 for row in resize if row.get("product_decision") == "resize-recommended"
     )
-    no_go_full_year = sum(1 for row in validation if row.get("qsts_full_year_verdict") == "no-go")
+    no_go_full_year = sum(1 for row in validation if _primary_verdict(row) == "no-go")
+    legacy_no_go_full_year = sum(
+        1 for row in validation if row.get("legacy_qsts_full_year_verdict", row.get("qsts_full_year_verdict")) == "no-go"
+    )
     readiness = _readiness(total_buses, full_year_buses, resize_recommendations)
     runtime_seconds = float(performance.get("total_full_year_runtime_seconds", 0.0))
+    resize_summary = _best_resize_scorecard_line(resize)
 
     return f"""# MVP Evidence Scorecard
 
 - readiness: {readiness}
 - full_year_coverage: {full_year_buses}/{total_buses} buses
-- full_year_no_go: {no_go_full_year}
+- selected_policy_no_go: {no_go_full_year}
+- legacy_qsts_full_year_no_go: {legacy_no_go_full_year}
 - false_positive_stratified: {false_positive_stratified}
 - resize_recommendations: {resize_recommendations}
+- best_resize_recommendation: {resize_summary}
+- decision_policy: docs/mvp-decision-policy.md
 - full_year_runtime_minutes: {runtime_seconds / 60:.2f}
 - qsts_result_rows: {len(qsts)}
 
@@ -84,11 +117,49 @@ buyer-side pre-feasibility aid and does not replace an official grid-connection 
 """
 
 
+def render_resize_recommendation_markdown(bundle_dir: Path) -> str:
+    resize = _read_csv(bundle_dir / "resize_results.csv")
+    best = _best_resize_row(resize)
+    if best is None:
+        return """# Resize Recommendation
+
+No resize recommendation is available.
+"""
+
+    original_mw = _float_or_none(best.get("original_requested_mw")) or 0.0
+    recommended_mw = _float_or_none(best.get("requested_mw")) or 0.0
+    delta_mw = recommended_mw - original_mw
+    bus_id = _resize_bus_id(best)
+    driver = best.get("verdict_driver", "")
+    constraint = best.get("main_recurring_constraint", "")
+    return f"""# Resize Recommendation
+
+Original request: {original_mw:.3f} MW
+Recommended size: {recommended_mw:.3f} MW
+Delta: {delta_mw:.3f} MW
+Bus: {bus_id}
+Decision: {best.get("product_decision", "")}
+Policy verdict: {_selected_policy_verdict(best)}
+Main driver: {driver}
+Dominant constraint: {constraint}
+
+Reason: the original requested MW fails the selected policy; the recommended size is
+the largest tested acceptable resize in `resize_results.csv`.
+"""
+
+
 def render_bundle_html(bundle_dir: Path) -> str:
     validation = _read_csv(bundle_dir / "validation_matrix.csv")
     resize = _read_csv(bundle_dir / "resize_results.csv")
     qsts = _read_csv(bundle_dir / "qsts_results.csv")
+    sensitivity = _read_csv(bundle_dir / "sensitivity_results.csv")
+    full_year_conditional = _read_csv(bundle_dir / "full_year_conditional_results.csv")
+    full_year_additional = _read_csv(bundle_dir / "full_year_additional_results.csv")
+    full_year_checks = full_year_additional or full_year_conditional
+    decision_frontier = _read_csv(bundle_dir / "decision_frontier.csv")
+    full_year_candidates = _read_csv(bundle_dir / "full_year_candidate_selection.csv")
     economic_scenarios = _economic_scenarios(bundle_dir)
+    gabarit_rows = _gabarit_assumption_rows(bundle_dir)
     scorecard = render_bundle_scorecard(bundle_dir)
     metrics = _bundle_metrics(validation, resize, qsts, bundle_dir)
     return f"""<!doctype html>
@@ -179,6 +250,24 @@ def render_bundle_html(bundle_dir: Path) -> str:
     </section>
 
     <section>
+      <h2>Recommended Resize</h2>
+      {_render_recommended_resize(resize)}
+    </section>
+
+    <section>
+      <h2>Benchmark Status</h2>
+      <p class="notice">This bundle uses a SimBench benchmark network. It proves the workflow and decision logic, not the feasibility of a real French site.</p>
+      <p>The commercial next step is to run the same workflow on a client, consultant, reconstructed public, or operator-validated network model with explicit data-source labels.</p>
+      <p><strong>MVP Decision Policy:</strong> <code>docs/mvp-decision-policy.md</code>. The default investor-facing policy is <code>standard</code>; thresholds are Thesegrid pre-feasibility assumptions, not official operator thresholds.</p>
+    </section>
+
+    <section>
+      <h2>Regulatory Assumption Traceability</h2>
+      <p class="notice">The RTE/CRE-inspired gabarit preset is a Thesegrid pre-feasibility proxy. Each rule is labelled with source timing, scope, hypothesis status, and limitation to avoid implying an official PTF or operator offer.</p>
+      {_html_table(gabarit_rows)}
+    </section>
+
+    <section>
       <h2>Scorecard</h2>
       <div class="scorecard">{html.escape(scorecard)}</div>
     </section>
@@ -194,6 +283,20 @@ def render_bundle_html(bundle_dir: Path) -> str:
     </section>
 
     <section>
+      <h2>Decision Matrix</h2>
+      <p class="notice">This matrix is stratified QSTS evidence when generated from the bus-by-MW sweep. Full-year QSTS is required before using any go verdict as investor-grade evidence.</p>
+      {_render_decision_matrix(sensitivity)}
+      <h3>Recommended MW by Bus</h3>
+      {_render_recommended_mw_by_bus(sensitivity)}
+      <h3>Full-Year Conditional Checks</h3>
+      {_render_full_year_conditional_checks(full_year_checks)}
+      <h3>Decision Frontier</h3>
+      {_render_decision_frontier(decision_frontier or _frontier_rows(qsts, full_year_checks))}
+      <h3>Next Full-Year Candidates</h3>
+      {_render_next_full_year_candidates(full_year_candidates)}
+    </section>
+
+    <section>
       <h2>Proxy Economics</h2>
       <p class="notice">This is proxy economics, not bankable revenue modelling. Values are scenario-comparison aids only.</p>
       {_html_table(_stringify_rows(economic_scenario_rows(economic_scenarios)))}
@@ -205,6 +308,10 @@ def render_bundle_html(bundle_dir: Path) -> str:
         {_artifact_link("validation_matrix.csv")}
         {_artifact_link("resize_results.csv")}
         {_artifact_link("economic_scenarios.csv")}
+        {_artifact_link("gabarit_assumptions.csv")}
+        {_artifact_link("gabarit_assumptions.md")}
+        {_artifact_link("qsts_economics.csv")}
+        {_artifact_link("decision_frontier.csv")}
         {_artifact_link("qsts_results.csv")}
         {_artifact_link("qsts_risk_summary.csv")}
         {_artifact_link("contractual_envelope.csv")}
@@ -265,7 +372,7 @@ def _bundle_metrics(
     performance = _read_json(bundle_dir / "qsts_performance.json")
     total_buses = len(validation)
     full_year_buses = sum(1 for row in validation if row.get("qsts_full_year_verdict"))
-    full_year_no_go = sum(1 for row in validation if row.get("qsts_full_year_verdict") == "no-go")
+    full_year_no_go = sum(1 for row in validation if _primary_verdict(row) == "no-go")
     false_positive_stratified = sum(
         1 for row in validation if row.get("calibration_status") == "false_positive_stratified"
     )
@@ -284,9 +391,13 @@ def _bundle_metrics(
 def _decision_sentence(metrics: dict[str, object]) -> str:
     return (
         f"{metrics['full_year_coverage']} have full-year evidence. "
-        f"{metrics['full_year_no_go']} buses are no-go at 5 MW, with "
+        f"{metrics['full_year_no_go']} buses are no-go under the selected policy at 5 MW, with "
         f"{metrics['resize_recommendations']} actionable resize recommendation."
     )
+
+
+def _primary_verdict(row: dict[str, str]) -> str:
+    return row.get("final_decision") or row.get("qsts_full_year_verdict", "")
 
 
 def _badge(label: str, class_name: str) -> str:
@@ -295,6 +406,351 @@ def _badge(label: str, class_name: str) -> str:
 
 def _artifact_link(filename: str) -> str:
     return f'<a href="{html.escape(filename)}">Open {html.escape(filename)}</a>'
+
+
+def _render_decision_matrix(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return (
+            "<p>No bus-by-MW sweep results available yet. Run "
+            "<code>thesegrid qsts-sweep --config experiments/bus_power_matrix_2026-05-22.json "
+            "--output results/&lt;run_id&gt;</code>, then copy or aggregate "
+            "<code>sensitivity_results.csv</code> into the investor bundle.</p>"
+        )
+
+    matrix: dict[str, dict[str, str]] = {}
+    bus_names: dict[str, str] = {}
+    requested_values: set[float] = set()
+    for row in rows:
+        if row.get("sampling_mode") not in {"", "stratified", "full_year"}:
+            continue
+        bus_id = row.get("bus_id", "")
+        if not bus_id:
+            continue
+        requested_mw = _float_or_none(row.get("requested_mw"))
+        if requested_mw is None:
+            continue
+        requested_values.add(requested_mw)
+        bus_names[bus_id] = row.get("bus_name", "")
+        verdict = row.get("qsts_verdict", "")
+        p90 = row.get("qsts_p90_curtailment_mw", "")
+        mwh = row.get("qsts_expected_curtailment_mwh", "")
+        matrix.setdefault(bus_id, {})[_format_mw_header(requested_mw)] = (
+            f"{verdict}<br><small>P90 {html.escape(p90)} MW / "
+            f"{html.escape(mwh)} MWh</small>"
+        )
+
+    if not matrix:
+        return "<p>No usable decision matrix rows available.</p>"
+
+    mw_headers = [_format_mw_header(value) for value in sorted(requested_values)]
+    header = "<th>bus_id</th><th>bus_name</th>" + "".join(
+        f"<th>{html.escape(header)}</th>" for header in mw_headers
+    )
+    body_rows = []
+    for bus_id in sorted(matrix, key=lambda value: int(value) if value.isdigit() else value):
+        cells = [
+            f"<td>{html.escape(bus_id)}</td>",
+            f"<td>{html.escape(bus_names.get(bus_id, ''))}</td>",
+        ]
+        for header_label in mw_headers:
+            cells.append(f"<td>{matrix[bus_id].get(header_label, '')}</td>")
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+    return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+
+
+def _render_recommended_mw_by_bus(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return "<p>No bus-by-MW recommendation rows available yet.</p>"
+
+    best_by_bus: dict[str, dict[str, str]] = {}
+    bus_names: dict[str, str] = {}
+    seen_buses: set[str] = set()
+    for row in rows:
+        bus_id = row.get("bus_id", "")
+        if not bus_id:
+            continue
+        seen_buses.add(bus_id)
+        bus_names[bus_id] = row.get("bus_name", "")
+        if row.get("qsts_verdict") not in {"go", "go-with-conditions"}:
+            continue
+        requested_mw = _float_or_none(row.get("requested_mw"))
+        if requested_mw is None:
+            continue
+        current = best_by_bus.get(bus_id)
+        current_mw = _float_or_none(current.get("recommended_mw") if current else None)
+        if current is None or current_mw is None or requested_mw > current_mw:
+            best_by_bus[bus_id] = {
+                "recommended_mw": f"{requested_mw:.6f}",
+                "qsts_verdict": row.get("qsts_verdict", ""),
+                "sampling_mode": row.get("sampling_mode", ""),
+                "qsts_p90_curtailment_mw": row.get("qsts_p90_curtailment_mw", ""),
+                "qsts_expected_curtailment_mwh": row.get("qsts_expected_curtailment_mwh", ""),
+                "main_recurring_constraint": row.get("main_recurring_constraint", ""),
+            }
+
+    table_rows: list[dict[str, str]] = []
+    for bus_id in sorted(seen_buses, key=lambda value: int(value) if value.isdigit() else value):
+        best = best_by_bus.get(bus_id)
+        if best is None:
+            table_rows.append(
+                {
+                    "bus_id": bus_id,
+                    "bus_name": bus_names.get(bus_id, ""),
+                    "recommended_mw": "",
+                    "evidence_verdict": "no acceptable stratified MW",
+                    "p90_mw": "",
+                    "expected_mwh": "",
+                    "recommended_next_action": "reject_or_test_lower_mw",
+                }
+            )
+            continue
+        verdict = best["qsts_verdict"]
+        next_action = (
+            "run_full_year_conditional_validation"
+            if verdict == "go-with-conditions"
+            else "run_full_year_validation"
+        )
+        table_rows.append(
+            {
+                "bus_id": bus_id,
+                "bus_name": bus_names.get(bus_id, ""),
+                "recommended_mw": _format_mw_header(float(best["recommended_mw"])),
+                "evidence_verdict": verdict,
+                "p90_mw": best["qsts_p90_curtailment_mw"],
+                "expected_mwh": best["qsts_expected_curtailment_mwh"],
+                "recommended_next_action": next_action,
+            }
+        )
+    return _html_table(table_rows)
+
+
+def _render_full_year_conditional_checks(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return (
+            "<p>No targeted full-year conditional validation rows are available yet. "
+            "Use this section for cases that looked acceptable in stratified QSTS and "
+            "need full-year confirmation.</p>"
+        )
+    return _html_table(rows)
+
+
+def _frontier_rows(
+    qsts_rows: list[dict[str, str]],
+    full_year_conditional_rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    rows = [_normalize_frontier_row(row) for row in qsts_rows]
+    rows.extend(_normalize_frontier_row(row) for row in full_year_conditional_rows)
+    return [row for row in rows if row]
+
+
+def _normalize_frontier_row(row: dict[str, str]) -> dict[str, str]:
+    requested_mw = _float_or_none(row.get("requested_mw"))
+    p90_mw = _float_or_none(
+        row.get("qsts_p90_curtailment_mw") or row.get("p90_curtailment_mw")
+    )
+    expected_mwh = _float_or_none(
+        row.get("weighted_curtailment_mwh")
+        or row.get("qsts_expected_curtailment_mwh")
+        or row.get("expected_curtailment_mwh")
+    )
+    if requested_mw is None or p90_mw is None or expected_mwh is None:
+        return {}
+    theoretical_mwh = requested_mw * 8760.0
+    energy_ratio = expected_mwh / theoretical_mwh if theoretical_mwh > 0 else 0.0
+    p90_ratio = p90_mw / requested_mw if requested_mw > 0 else 0.0
+    max_event_hours = int(float(row.get("max_event_hours") or 0))
+    max_event_mwh = _float_or_none(row.get("max_event_mwh")) or 0.0
+    max_event_mwh_per_mw = max_event_mwh / requested_mw if requested_mw > 0 else 0.0
+    return {
+        "bus_id": row.get("bus_id", ""),
+        "bus_name": row.get("bus_name", ""),
+        "requested_mw": _format_mw_header(requested_mw),
+        "source_verdict": row.get("qsts_verdict", ""),
+        "source_sampling": row.get("sampling_mode") or row.get("validation_level", ""),
+        "p90_mw": f"{p90_mw:.6f}",
+        "p90_curtailment_ratio": f"{p90_ratio:.3%}",
+        "expected_mwh": f"{expected_mwh:.6f}",
+        "curtailment_energy_ratio": f"{energy_ratio:.3%}",
+        "max_event_hours": str(max_event_hours),
+        "max_event_mwh_per_mw": f"{max_event_mwh_per_mw:.6f}",
+        **{
+            policy.name: frontier_verdict(
+                p90_curtailment_ratio=p90_ratio,
+                curtailment_energy_ratio=energy_ratio,
+                max_event_hours=max_event_hours,
+                max_event_mwh_per_mw=max_event_mwh_per_mw,
+                policy=policy,
+            )
+            for policy in DECISION_FRONTIER_POLICIES
+        },
+    }
+
+
+def _render_decision_frontier(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return (
+            "<p>No full-year rows are available for decision-frontier analysis yet. "
+            "Run targeted full-year validation before using this table.</p>"
+        )
+    return (
+        "<p>This table reclassifies full-year evidence under several curtailment-risk "
+        "policies. These are Thesegrid policy assumptions for pre-feasibility, not "
+        "official network-operator thresholds. The default investor policy is "
+        "<code>standard</code>.</p>"
+        + _html_table(_decision_policy_rows())
+        + _html_table(rows)
+    )
+
+
+def _decision_policy_rows() -> list[dict[str, str]]:
+    return [
+        {
+            "policy": policy.name,
+            "policy_max_p90_ratio": f"{policy.max_p90_ratio:.6f}",
+            "policy_max_energy_ratio": f"{policy.max_energy_ratio:.6f}",
+            "policy_max_event_hours": str(policy.max_event_hours),
+            "policy_max_event_mwh_per_mw": f"{policy.max_event_mwh_per_mw:.6f}",
+            "status": "Thesegrid policy assumption, not official threshold",
+        }
+        for policy in DECISION_FRONTIER_POLICIES
+    ]
+
+
+def _render_next_full_year_candidates(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return (
+            "<p>No automatic full-year candidate selection is available yet. Run "
+            "<code>thesegrid select-full-year-candidates</code> after screening and "
+            "stratified QSTS.</p>"
+        )
+    return _html_table(rows)
+
+
+def _render_recommended_resize(rows: list[dict[str, str]]) -> str:
+    best = _best_resize_row(rows)
+    if best is None:
+        return "<p>No resize recommendation is available.</p>"
+    original_mw = _float_or_none(best.get("original_requested_mw")) or 0.0
+    recommended_mw = _float_or_none(best.get("requested_mw")) or 0.0
+    delta_mw = recommended_mw - original_mw
+    driver = best.get("verdict_driver", "")
+    constraint = best.get("main_recurring_constraint", "")
+    recommendations = _recommended_resize_rows(rows)
+    summary = _html_table(
+        [
+            {
+                "bus_id": _resize_bus_id(best),
+                "Original request": f"{original_mw:.3f} MW",
+                "Recommended size": f"{recommended_mw:.3f} MW",
+                "Delta": f"{delta_mw:.3f} MW",
+                "Decision": best.get("product_decision", ""),
+                "Policy verdict": _selected_policy_verdict(best),
+                "Main driver": driver,
+                "Dominant constraint": constraint,
+            }
+        ]
+    )
+    return (
+        "<h3>Resize Decision</h3>"
+        + summary
+        + "<h3>Resize Evidence</h3>"
+        + _html_table(recommendations)
+    )
+
+
+def _best_resize_scorecard_line(rows: list[dict[str, str]]) -> str:
+    best = _best_resize_row(rows)
+    if best is None:
+        return "none"
+    original_mw = _float_or_none(best.get("original_requested_mw")) or 0.0
+    recommended_mw = _float_or_none(best.get("requested_mw")) or 0.0
+    return f"bus {_resize_bus_id(best)} from {original_mw:.3f} MW to {recommended_mw:.3f} MW"
+
+
+def _best_resize_row(rows: list[dict[str, str]]) -> dict[str, str] | None:
+    recommendations = _recommended_resize_rows(rows)
+    if not recommendations:
+        return None
+    return max(
+        recommendations,
+        key=lambda row: (
+            _float_or_none(row.get("original_requested_mw")) or 0.0,
+            _float_or_none(row.get("requested_mw")) or 0.0,
+        ),
+    )
+
+
+def _resize_bus_id(row: dict[str, str]) -> str:
+    bus_id = row.get("bus_id", "")
+    if bus_id:
+        return bus_id
+    match = re.search(r"bus(\d+)", row.get("scenario", ""))
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _recommended_resize_rows(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    best_by_key: dict[str, dict[str, str]] = {}
+    for row in rows:
+        if row.get("product_decision") != "resize-recommended":
+            continue
+        key = row.get("bus_id") or row.get("scenario") or row.get("qsts_output_dir", "")
+        if not key:
+            key = str(len(best_by_key))
+        current = best_by_key.get(key)
+        row_mw = _float_or_none(row.get("requested_mw")) or 0.0
+        current_mw = 0.0
+        if current is not None:
+            current_mw = _float_or_none(current.get("requested_mw")) or 0.0
+        if current is None or row_mw > current_mw:
+            best_by_key[key] = row
+    return [
+        {
+            "bus_id": row.get("bus_id", ""),
+            "scenario": row.get("scenario", ""),
+            "original_requested_mw": row.get("original_requested_mw", ""),
+            "recommended_mw": row.get("requested_mw", ""),
+            "requested_mw": row.get("requested_mw", ""),
+            "delta_mw_from_original": row.get("delta_mw_from_original", ""),
+            "selected_policy": row.get("selected_policy", ""),
+            "policy_verdict": _selected_policy_verdict(row),
+            "product_decision": row.get("product_decision", ""),
+            "expected_curtailment_mwh": row.get("expected_curtailment_mwh", ""),
+            "p90_curtailment_mw": row.get("p90_curtailment_mw", ""),
+            "verdict_driver": row.get("verdict_driver", ""),
+            "main_recurring_constraint": row.get("main_recurring_constraint", ""),
+            "delta_npv_eur": row.get("delta_npv_eur", ""),
+        }
+        for row in sorted(
+            best_by_key.values(),
+            key=lambda item: (item.get("bus_id", ""), item.get("scenario", "")),
+        )
+    ]
+
+
+def _selected_policy_verdict(row: dict[str, str]) -> str:
+    selected_policy = row.get("selected_policy", "")
+    if selected_policy:
+        verdict = row.get(f"{selected_policy}_policy_verdict", "")
+        if verdict:
+            return verdict
+    if row.get("policy_verdict"):
+        return row["policy_verdict"]
+    return row.get("qsts_verdict", "")
+
+
+def _format_mw_header(value: float) -> str:
+    return f"{value:.0f} MW" if value.is_integer() else f"{value:.3f} MW"
+
+
+def _float_or_none(value: str | None) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:
@@ -316,6 +772,13 @@ def _economic_scenarios(bundle_dir: Path):
         resize_rows=_read_csv(bundle_dir / "resize_results.csv"),
         assumptions=EconomicScenarioAssumptions(),
     )
+
+
+def _gabarit_assumption_rows(bundle_dir: Path) -> list[dict[str, str]]:
+    rows = _read_csv(bundle_dir / "gabarit_assumptions.csv")
+    if rows:
+        return rows
+    return _stringify_rows(list(gabarit_rule_rows(rte_cre_inspired_v1_rules())))
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:

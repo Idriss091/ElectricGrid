@@ -12,6 +12,12 @@ VALIDATION_MATRIX_COLUMNS = (
     "qsts_short_verdict",
     "qsts_stratified_verdict",
     "qsts_full_year_verdict",
+    "legacy_qsts_full_year_verdict",
+    "selected_policy",
+    "strict_policy_verdict",
+    "standard_policy_verdict",
+    "flexible_policy_verdict",
+    "aggressive_policy_verdict",
     "final_decision",
     "calibration_status",
     "validation_level",
@@ -35,6 +41,12 @@ class ValidationMatrixRow:
     qsts_short_verdict: str
     qsts_stratified_verdict: str
     qsts_full_year_verdict: str
+    legacy_qsts_full_year_verdict: str
+    selected_policy: str
+    strict_policy_verdict: str
+    standard_policy_verdict: str
+    flexible_policy_verdict: str
+    aggressive_policy_verdict: str
     final_decision: str
     calibration_status: str
     validation_level: str
@@ -65,11 +77,14 @@ def build_validation_matrix(
     qsts_short_csv: Path | None = None,
     qsts_stratified_csv: Path | None = None,
     qsts_full_year_csvs: tuple[Path, ...] = (),
+    decision_frontier_csvs: tuple[Path, ...] = (),
+    selected_policy: str = "standard",
 ) -> ValidationMatrix:
     screening = _read_screening(screening_csv)
     short = _read_qsts(qsts_short_csv)
     stratified = _read_qsts(qsts_stratified_csv)
     full_year = _read_many_qsts(qsts_full_year_csvs)
+    frontier = _read_many_frontier(decision_frontier_csvs)
     validated_bus_ids = set(short) | set(stratified) | set(full_year)
     bus_ids = sorted(validated_bus_ids or set(screening))
     rows = tuple(
@@ -79,6 +94,8 @@ def build_validation_matrix(
             short=short.get(bus_id, {}),
             stratified=stratified.get(bus_id, {}),
             full_year=full_year.get(bus_id, {}),
+            frontier=frontier.get(bus_id, {}),
+            selected_policy=selected_policy,
         )
         for bus_id in bus_ids
     )
@@ -144,11 +161,24 @@ def _build_row(
     short: dict[str, str],
     stratified: dict[str, str],
     full_year: dict[str, str],
+    frontier: dict[str, str],
+    selected_policy: str,
 ) -> ValidationMatrixRow:
     strongest = full_year or stratified or short
     has_full_year = bool(full_year)
-    final_decision = full_year.get("qsts_verdict", "requires_full_year_validation")
-    calibration_status = _calibration_status(screening, short, stratified, full_year)
+    policy_verdict = frontier.get(selected_policy, "")
+    final_decision = (
+        policy_verdict
+        if has_full_year and policy_verdict
+        else full_year.get("qsts_verdict", "requires_full_year_validation")
+    )
+    calibration_status = _calibration_status(
+        screening,
+        short,
+        stratified,
+        full_year,
+        final_decision,
+    )
     return ValidationMatrixRow(
         bus_id=bus_id,
         bus_name=_first_non_empty(
@@ -161,6 +191,12 @@ def _build_row(
         qsts_short_verdict=short.get("qsts_verdict", ""),
         qsts_stratified_verdict=stratified.get("qsts_verdict", ""),
         qsts_full_year_verdict=full_year.get("qsts_verdict", ""),
+        legacy_qsts_full_year_verdict=full_year.get("qsts_verdict", ""),
+        selected_policy=selected_policy,
+        strict_policy_verdict=frontier.get("strict", ""),
+        standard_policy_verdict=frontier.get("standard", ""),
+        flexible_policy_verdict=frontier.get("flexible", ""),
+        aggressive_policy_verdict=frontier.get("aggressive", ""),
         final_decision=final_decision,
         calibration_status=calibration_status,
         validation_level=strongest.get(
@@ -173,11 +209,11 @@ def _build_row(
             "reject_or_resize_connection" if has_full_year else "run_qsts_validation",
         ),
         qsts_short_p90_mw=short.get("p90_curtailment_mw", ""),
-        qsts_short_expected_mwh=short.get("expected_curtailment_mwh", ""),
+        qsts_short_expected_mwh=_qsts_decision_mwh(short),
         qsts_stratified_p90_mw=stratified.get("p90_curtailment_mw", ""),
-        qsts_stratified_expected_mwh=stratified.get("expected_curtailment_mwh", ""),
+        qsts_stratified_expected_mwh=_qsts_decision_mwh(stratified),
         qsts_full_year_p90_mw=full_year.get("p90_curtailment_mw", ""),
-        qsts_full_year_expected_mwh=full_year.get("expected_curtailment_mwh", ""),
+        qsts_full_year_expected_mwh=_qsts_decision_mwh(full_year),
         main_recurring_constraint=_first_non_empty(
             full_year.get("main_recurring_constraint", ""),
             stratified.get("main_recurring_constraint", ""),
@@ -191,10 +227,11 @@ def _calibration_status(
     short: dict[str, str],
     stratified: dict[str, str],
     full_year: dict[str, str],
+    final_decision: str | None = None,
 ) -> str:
     if not full_year:
         return "requires_full_year_validation"
-    full_verdict = full_year.get("qsts_verdict", "")
+    full_verdict = final_decision or full_year.get("qsts_verdict", "")
     stratified_verdict = stratified.get("qsts_verdict", "")
     short_verdict = short.get("qsts_verdict", "")
     screening_verdict = screening.get("verdict", "")
@@ -235,6 +272,21 @@ def _read_many_qsts(paths: tuple[Path, ...]) -> dict[int, dict[str, str]]:
     return rows
 
 
+def _read_many_frontier(paths: tuple[Path, ...]) -> dict[int, dict[str, str]]:
+    rows: dict[int, dict[str, str]] = {}
+    for path in paths:
+        if path is None:
+            continue
+        with path.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(handle):
+                bus_id = int(row["bus_id"])
+                policy = row.get("policy", "")
+                if not policy:
+                    continue
+                rows.setdefault(bus_id, {})[policy] = row.get("frontier_verdict", "")
+    return rows
+
+
 def _render_rows(rows: tuple[ValidationMatrixRow, ...]) -> str:
     if not rows:
         return "No validation rows available."
@@ -266,4 +318,10 @@ def _first_non_empty(*values: str) -> str:
         if value:
             return value
     return ""
-    return ""
+
+
+def _qsts_decision_mwh(row: dict[str, str]) -> str:
+    return _first_non_empty(
+        row.get("weighted_curtailment_mwh", ""),
+        row.get("expected_curtailment_mwh", ""),
+    )

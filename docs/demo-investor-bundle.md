@@ -39,5 +39,5 @@ verdict is the MVP investor reference layer when available. Screening, short QST
 stratified QSTS remain triage or pre-demo evidence.
 
 Use `qsts-resize` when the requested MW is rejected. The product decision
-`resize-recommended` means a lower tested MW is acceptable under the configured QSTS
-curtailment tolerances.
+`resize-recommended` means a lower tested MW is acceptable under the selected
+decision-frontier policy.

@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, Sequence
@@ -20,6 +20,7 @@ from thesegrid.contractual import (
     synthesize_contractual_envelope,
 )
 from thesegrid.constraints import ConstraintSettings, check_constraints
+from thesegrid.decision_frontier import decision_frontier_rows
 from thesegrid.gabarits import GabaritKind, annual_timestamps, is_restricted
 from thesegrid.models import ConstraintViolation, CurtailmentEstimate, Direction
 from thesegrid.networks import ToyNetwork, load_network
@@ -42,6 +43,9 @@ QSTS_RESULT_COLUMNS = (
     "feasible_hours",
     "violation_hours",
     "expected_curtailment_mwh",
+    "sampled_curtailment_mwh",
+    "weighted_curtailment_mwh",
+    "curtailment_energy_ratio",
     "p50_curtailment_mw",
     "p90_curtailment_mw",
     "main_recurring_constraint",
@@ -99,7 +103,27 @@ INVESTOR_DECISION_COLUMNS = (
     "static_conditional_capacity_mw",
     "qsts_p90_curtailment_mw",
     "qsts_expected_curtailment_mwh",
+    "sampled_curtailment_mwh",
+    "weighted_curtailment_mwh",
+    "curtailment_energy_ratio",
     "main_recurring_constraint",
+)
+
+QSTS_ECONOMICS_COLUMNS = (
+    "bus_id",
+    "bus_name",
+    "qsts_verdict",
+    "requested_mw",
+    "storage_duration_hours",
+    "energy_capacity_mwh",
+    "capex_eur",
+    "annual_gross_revenue_eur",
+    "annual_curtailment_loss_eur",
+    "annual_fixed_opex_eur",
+    "annual_ebitda_proxy_eur",
+    "connect_now_value_eur",
+    "wait_value_eur",
+    "delta_npv_eur",
 )
 
 CONTRACTUAL_ENVELOPE_COLUMNS = (
@@ -138,6 +162,9 @@ QSTS_RISK_SUMMARY_COLUMNS = (
     "qsts_verdict",
     "curtailment_hours",
     "expected_curtailment_mwh",
+    "sampled_curtailment_mwh",
+    "weighted_curtailment_mwh",
+    "curtailment_energy_ratio",
     "curtailment_p90_mw",
     "curtailment_p95_mw",
     "curtailment_p99_mw",
@@ -173,6 +200,10 @@ class QstsRequest:
     curtailment_penalty_eur_per_mwh: float = 100.0
     reinforcement_wait_years: float = 5.0
     discount_rate: float = 0.08
+    pf_numba: bool = False
+    pf_algorithm: str = "nr"
+    pf_init: str = "auto"
+    pf_recycle: bool = False
 
     def __post_init__(self) -> None:
         if not self.network_code:
@@ -215,6 +246,10 @@ class QstsRequest:
             raise ValueError("reinforcement_wait_years must be non-negative")
         if self.discount_rate < 0:
             raise ValueError("discount_rate must be non-negative")
+        if self.pf_algorithm not in {"nr", "iwamoto_nr", "bfsw", "gs", "fdbx", "fdxb"}:
+            raise ValueError("pf_algorithm must be a supported pandapower runpp algorithm")
+        if self.pf_init not in {"auto", "flat", "dc", "results"}:
+            raise ValueError("pf_init must be one of auto, flat, dc, or results")
 
 
 @dataclass(frozen=True)
@@ -256,10 +291,25 @@ class QstsBusResult:
     curtailment: CurtailmentEstimate
     main_recurring_constraint: str
     hourly_records: tuple[QstsHourlyRecord, ...]
+    sampled_curtailment_mwh: float = 0.0
+    weighted_curtailment_mwh: float = 0.0
+    curtailment_energy_ratio: float = 0.0
     baseline_violating_hours: int = 0
     baseline_main_constraint: str = ""
     baseline_max_vm_pu: float | None = None
     baseline_max_loading_percent: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.sampled_curtailment_mwh == 0.0 and self.curtailment.expected_mwh > 0.0:
+            object.__setattr__(self, "sampled_curtailment_mwh", self.curtailment.expected_mwh)
+        if self.weighted_curtailment_mwh == 0.0 and self.curtailment.expected_mwh > 0.0:
+            object.__setattr__(self, "weighted_curtailment_mwh", self.curtailment.expected_mwh)
+        if self.curtailment_energy_ratio == 0.0 and self.weighted_curtailment_mwh > 0.0:
+            object.__setattr__(
+                self,
+                "curtailment_energy_ratio",
+                _curtailment_energy_ratio(self.weighted_curtailment_mwh, self.requested_mw),
+            )
 
 
 @dataclass(frozen=True)
@@ -309,6 +359,9 @@ class QstsRiskSummaryRow:
     qsts_verdict: str
     curtailment_hours: int
     expected_curtailment_mwh: float
+    sampled_curtailment_mwh: float
+    weighted_curtailment_mwh: float
+    curtailment_energy_ratio: float
     curtailment_p90_mw: float
     curtailment_p95_mw: float
     curtailment_p99_mw: float
@@ -377,6 +430,8 @@ class QstsOutputPaths:
     contractual_envelope_csv_path: Path
     risk_summary_csv_path: Path
     risk_summary_json_path: Path
+    economics_csv_path: Path
+    decision_frontier_csv_path: Path
     bus_detail_paths: tuple[Path, ...]
 
 
@@ -441,6 +496,25 @@ def qsts_curtailment_estimate(hourly_records: pd.DataFrame, timestep_hours: floa
     return estimate_curtailment(worst_by_timestamp.tolist(), timestep_hours=timestep_hours)
 
 
+def weighted_qsts_curtailment_estimate(
+    hourly_records: pd.DataFrame,
+    timestamp_weights: dict[str, float],
+) -> CurtailmentEstimate:
+    if hourly_records.empty:
+        return estimate_curtailment(())
+    worst_by_timestamp = hourly_records.groupby("timestamp")["curtailed_mw"].max()
+    weighted_mwh = 0.0
+    for timestamp, curtailed_mw in worst_by_timestamp.items():
+        weighted_mwh += max(0.0, float(curtailed_mw)) * timestamp_weights.get(str(timestamp), 1.0)
+    base = estimate_curtailment(worst_by_timestamp.tolist())
+    return CurtailmentEstimate(
+        expected_hours=base.expected_hours,
+        expected_mwh=round(weighted_mwh, 6),
+        p50_mw=base.p50_mw,
+        p90_mw=base.p90_mw,
+    )
+
+
 def classify_incremental_violations(
     candidate: dict[tuple[str, int, str], float],
     baseline: dict[tuple[str, int, str], float],
@@ -487,6 +561,10 @@ def run_qsts(
     )
     if not time_steps:
         raise ValueError("QSTS requires at least one profile time step")
+    timestamp_weights = _timestamp_weights(
+        time_steps,
+        _time_step_weights(time_steps, request, _available_profile_hours(profiles)),
+    )
 
     baseline_cache: dict[int, _BaselineState] = {}
     tracker = _QstsPerformanceTracker(
@@ -507,10 +585,13 @@ def run_qsts(
                 tolerance_mw=request.tolerance_mw,
                 p90_curtailment_tolerance_mw=request.p90_curtailment_tolerance_mw,
                 expected_curtailment_tolerance_mwh=request.expected_curtailment_tolerance_mwh,
+                timestamp_weights=timestamp_weights,
+                request=request,
                 baseline_cache=baseline_cache,
                 tracker=tracker,
             )
         )
+    tracker.evaluated_time_steps = len(time_steps)
     return QstsResult(
         request=request,
         buses=tuple(bus_results),
@@ -535,6 +616,8 @@ def write_qsts_outputs(
     investor_decision_csv = output_dir / "investor_decision.csv"
     risk_summary_csv = output_dir / "qsts_risk_summary.csv"
     risk_summary_json = output_dir / "qsts_risk_summary.json"
+    economics_csv = output_dir / "qsts_economics.csv"
+    decision_frontier_csv = output_dir / "decision_frontier.csv"
     envelope_csv = output_dir / "qsts_envelope.csv"
     envelope_summary_csv = output_dir / "qsts_envelope_summary.csv"
     contractual_envelope_csv = output_dir / "contractual_envelope.csv"
@@ -563,6 +646,53 @@ def write_qsts_outputs(
                     evaluated_time_steps=result.performance.evaluated_time_steps,
                 )
             )
+
+    with economics_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=QSTS_ECONOMICS_COLUMNS)
+        writer.writeheader()
+        for bus in result.buses:
+            writer.writerow(_qsts_economics_row(result.request, bus))
+
+    with decision_frontier_csv.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=(
+                "bus_id",
+                "bus_name",
+                "policy",
+                "qsts_p90_mw",
+                "p90_curtailment_ratio",
+                "weighted_curtailment_mwh",
+                "curtailment_energy_ratio",
+                "max_event_hours",
+                "max_event_mwh",
+                "max_event_mwh_per_mw",
+                "policy_max_p90_ratio",
+                "policy_max_energy_ratio",
+                "policy_max_event_hours",
+                "policy_max_event_mwh_per_mw",
+                "frontier_verdict",
+                "validation_level",
+            ),
+        )
+        writer.writeheader()
+        for bus in result.buses:
+            max_event_hours, max_event_mwh = _bus_max_curtailment_event(bus)
+            for row in decision_frontier_rows(
+                bus_id=bus.bus_id,
+                bus_name=bus.bus_name,
+                requested_mw=bus.requested_mw,
+                qsts_p90_mw=bus.curtailment.p90_mw,
+                weighted_curtailment_mwh=bus.weighted_curtailment_mwh,
+                curtailment_energy_ratio=bus.curtailment_energy_ratio,
+                max_event_hours=max_event_hours,
+                max_event_mwh=max_event_mwh,
+                validation_level=_validation_level(
+                    result.request,
+                    result.performance.evaluated_time_steps,
+                ),
+            ):
+                writer.writerow(_decision_frontier_row(row))
 
     risk_summary_rows = summarize_qsts_risk(result)
     with risk_summary_csv.open("w", newline="", encoding="utf-8") as handle:
@@ -638,6 +768,8 @@ def write_qsts_outputs(
             "investor_decision": investor_decision_csv,
             "qsts_risk_summary": risk_summary_csv,
             "qsts_risk_summary_json": risk_summary_json,
+            "qsts_economics": economics_csv,
+            "decision_frontier": decision_frontier_csv,
             "qsts_envelope": envelope_csv,
             "qsts_envelope_summary": envelope_summary_csv,
             "contractual_envelope": contractual_envelope_csv,
@@ -660,6 +792,8 @@ def write_qsts_outputs(
         contractual_envelope_csv_path=contractual_envelope_csv,
         risk_summary_csv_path=risk_summary_csv,
         risk_summary_json_path=risk_summary_json,
+        economics_csv_path=economics_csv,
+        decision_frontier_csv_path=decision_frontier_csv,
         bus_detail_paths=tuple(detail_paths),
     )
 
@@ -716,9 +850,10 @@ def summarize_qsts_risk(result: QstsResult) -> tuple[QstsRiskSummaryRow, ...]:
                 bus_name=bus.bus_name,
                 qsts_verdict=bus.qsts_verdict,
                 curtailment_hours=int((curtailed > 1e-9).sum()) if not curtailed.empty else 0,
-                expected_curtailment_mwh=round(float(curtailed.sum()), 6)
-                if not curtailed.empty
-                else 0.0,
+                expected_curtailment_mwh=bus.curtailment.expected_mwh,
+                sampled_curtailment_mwh=bus.sampled_curtailment_mwh,
+                weighted_curtailment_mwh=bus.weighted_curtailment_mwh,
+                curtailment_energy_ratio=bus.curtailment_energy_ratio,
                 curtailment_p90_mw=_series_quantile(curtailed, 0.90),
                 curtailment_p95_mw=_series_quantile(curtailed, 0.95),
                 curtailment_p99_mw=_series_quantile(curtailed, 0.99),
@@ -898,6 +1033,7 @@ def render_qsts_investment_memo(result: QstsResult) -> str:
         decision_drivers = _render_decision_drivers(summarize_qsts_risk(result))
         decision_snapshot = _render_decision_snapshot(result)
     economics = _qsts_economics_proxy(result)
+    economics_table = _render_qsts_economics_table(result)
     return f"""# QSTS BESS Investment Memo
 
 This memo is an early-stage buyer-side decision aid for BESS flexible connection pre-feasibility. It does not replace an official grid-connection study.
@@ -942,7 +1078,7 @@ Cette enveloppe est une approximation pré-faisabilité inspirée du cadre RTE/C
 
 {contractual_detail}
 
-## Economics Proxy
+## Primary Bus Economics Proxy
 
 This is a proxy, not bankable revenue modelling. It is intended to compare connect-now
 under a flexible gabarit against waiting for reinforcement; it is not a PTF, an
@@ -960,6 +1096,10 @@ official offer, or a financing model.
 - connect_now_value_eur: {economics.connect_now_value_eur:.2f}
 - wait_value_eur: {economics.wait_value_eur:.2f}
 - delta_npv_eur: {economics.delta_npv_eur:.2f}
+
+## Per-Bus Economics Proxy
+
+{economics_table}
 
 ## Interpretation
 
@@ -1019,6 +1159,8 @@ def _run_qsts_for_bus(
     tolerance_mw: float,
     p90_curtailment_tolerance_mw: float,
     expected_curtailment_tolerance_mwh: float,
+    timestamp_weights: dict[str, float] | None = None,
+    request: QstsRequest | None = None,
     baseline_cache: dict[int, _BaselineState] | None = None,
     tracker: _QstsPerformanceTracker | None = None,
 ) -> QstsBusResult:
@@ -1033,13 +1175,19 @@ def _run_qsts_for_bus(
     tracker = tracker if tracker is not None else _QstsPerformanceTracker()
     tracker.evaluated_buses += 1
 
-    with _QstsDispatchEvaluator(net, selected.bus_id, settings, tracker) as evaluator:
+    with _QstsDispatchEvaluator(net, selected.bus_id, settings, tracker, request=request) as evaluator:
         for position, time_step in enumerate(time_steps):
             _apply_profiles(net, profiles, time_step)
             evaluator.reset_candidate()
             if time_step not in baseline_cache:
                 tracker.baseline_cache_misses += 1
-                baseline_cache[time_step] = _baseline_state(net, selected.bus_id, settings, tracker)
+                baseline_cache[time_step] = _cached_baseline_state(
+                    net,
+                    selected.bus_id,
+                    settings,
+                    tracker,
+                    request=request,
+                )
             else:
                 tracker.baseline_cache_hits += 1
             baseline_state = baseline_cache[time_step]
@@ -1102,9 +1250,11 @@ def _run_qsts_for_bus(
             tracker.record_time_step()
 
     hourly_frame = pd.DataFrame(asdict(record) for record in records)
-    curtailment = qsts_curtailment_estimate(hourly_frame)
+    sampled_curtailment = qsts_curtailment_estimate(hourly_frame)
+    curtailment = weighted_qsts_curtailment_estimate(hourly_frame, timestamp_weights or {})
     total_hours = len(time_steps)
     feasible_hours = total_hours - curtailment.expected_hours
+    energy_ratio = _curtailment_energy_ratio(curtailment.expected_mwh, requested_mw)
     qsts_verdict = _qsts_verdict(
         curtailment,
         p90_tolerance_mw=p90_curtailment_tolerance_mw,
@@ -1124,6 +1274,9 @@ def _run_qsts_for_bus(
         curtailment=curtailment,
         main_recurring_constraint=_main_recurring_constraint(constraint_counts),
         hourly_records=tuple(records),
+        sampled_curtailment_mwh=sampled_curtailment.expected_mwh,
+        weighted_curtailment_mwh=curtailment.expected_mwh,
+        curtailment_energy_ratio=energy_ratio,
         baseline_violating_hours=baseline_violating_hours,
         baseline_main_constraint=_main_recurring_constraint(baseline_constraint_counts),
         baseline_max_vm_pu=baseline_max_vm_pu,
@@ -1181,6 +1334,85 @@ def _profile_time_steps(
         if stratified:
             return stratified
     return tuple(range(start_hour, end, sample_every_n_hours))
+
+
+def _available_profile_hours(profiles: dict[str, pd.DataFrame]) -> int:
+    lengths = [len(frame) for frame in profiles.values() if not frame.empty]
+    return min(lengths) if lengths else 0
+
+
+def _time_step_weights(
+    time_steps: tuple[int, ...],
+    request: QstsRequest,
+    available_hours: int,
+) -> dict[int, float]:
+    if not time_steps:
+        return {}
+    if not request.stratified_sample:
+        return {time_step: 1.0 for time_step in time_steps}
+
+    timestamps = annual_timestamps(2026)
+    upper = min(available_hours, len(timestamps))
+    if upper < 8760:
+        return {time_step: 1.0 for time_step in time_steps}
+
+    return {
+        time_step: float(_days_in_month(timestamps[time_step].month) * _time_block_width(timestamps[time_step].hour))
+        for time_step in time_steps
+        if 0 <= time_step < len(timestamps)
+    }
+
+
+def _timestamp_weights(
+    time_steps: tuple[int, ...],
+    time_step_weights: dict[int, float],
+) -> dict[str, float]:
+    timestamps = _timestamps_for_steps(time_steps)
+    return {
+        str(timestamp): time_step_weights.get(time_step, 1.0)
+        for time_step, timestamp in zip(time_steps, timestamps, strict=True)
+    }
+
+
+def _days_in_month(month: int) -> int:
+    month_lengths = {
+        1: 31,
+        2: 28,
+        3: 31,
+        4: 30,
+        5: 31,
+        6: 30,
+        7: 31,
+        8: 31,
+        9: 30,
+        10: 31,
+        11: 30,
+        12: 31,
+    }
+    return month_lengths[month]
+
+
+def _time_block_width(hour: int) -> int:
+    blocks = (
+        (0, 7),
+        (7, 10),
+        (10, 13),
+        (13, 17),
+        (17, 18),
+        (18, 21),
+        (21, 24),
+    )
+    for start, end in blocks:
+        if start <= hour < end:
+            return end - start
+    return 1
+
+
+def _curtailment_energy_ratio(weighted_curtailment_mwh: float, requested_mw: float) -> float:
+    denominator = requested_mw * 8760.0
+    if denominator <= 0:
+        return 0.0
+    return round(weighted_curtailment_mwh / denominator, 6)
 
 
 def _stratified_time_steps(start_hour: int, end_hour: int) -> tuple[int, ...]:
@@ -1269,6 +1501,7 @@ class _QstsPerformanceTracker:
         self.baseline_cache_hits = 0
         self.baseline_cache_misses = 0
         self.evaluated_time_steps = 0
+        self.evaluated_bus_hours = 0
         self.evaluated_buses = 0
 
     def record_baseline_power_flow(self) -> None:
@@ -1280,19 +1513,19 @@ class _QstsPerformanceTracker:
         self.candidate_power_flow_calls += 1
 
     def record_time_step(self) -> None:
-        self.evaluated_time_steps += 1
+        self.evaluated_bus_hours += 1
         if (
             self.progress_every_n_hours > 0
-            and self.evaluated_time_steps % self.progress_every_n_hours == 0
+            and self.evaluated_bus_hours % self.progress_every_n_hours == 0
         ):
             total = self.total_buses * self.total_time_steps
             print(
-                f"qsts progress: {self.evaluated_time_steps}/{total} bus-hours evaluated",
+                f"qsts progress: {self.evaluated_bus_hours}/{total} bus-hours evaluated",
                 file=sys.stderr,
             )
 
     def to_stats(self, runtime_seconds: float) -> QstsPerformanceStats:
-        evaluated_bus_hours = self.evaluated_time_steps
+        evaluated_bus_hours = self.evaluated_bus_hours
         power_flow_calls_per_bus_hour = (
             self.power_flow_calls / evaluated_bus_hours if evaluated_bus_hours else 0.0
         )
@@ -1321,11 +1554,13 @@ class _QstsDispatchEvaluator:
         bus_id: int,
         settings: ConstraintSettings,
         tracker: _QstsPerformanceTracker,
+        request: QstsRequest | None = None,
     ) -> None:
         self.net = net
         self.bus_id = bus_id
         self.settings = settings
         self.tracker = tracker
+        self.request = request
         self._sgen_id: int | None = None
         self._load_id: int | None = None
 
@@ -1377,15 +1612,13 @@ class _QstsDispatchEvaluator:
         if isinstance(self.net, ToyNetwork):
             return evaluate_dispatch(self.net, self.bus_id, direction, mw, self.settings)
 
-        import pandapower as pp
-
         self.reset_candidate()
         if direction == "injection" and self._sgen_id is not None:
             self.net.sgen.at[self._sgen_id, "p_mw"] = mw
         elif direction == "withdrawal" and self._load_id is not None:
             self.net.load.at[self._load_id, "p_mw"] = mw
         try:
-            pp.runpp(self.net, numba=False)
+            _run_pandapower_power_flow(self.net, self.request)
         except Exception:
             return DispatchEvaluation(
                 feasible=False,
@@ -1415,6 +1648,7 @@ def _baseline_state(
     bus_id: int,
     settings: ConstraintSettings,
     tracker: _QstsPerformanceTracker | None = None,
+    request: QstsRequest | None = None,
 ) -> _BaselineState:
     if tracker is not None:
         tracker.record_baseline_power_flow()
@@ -1431,10 +1665,8 @@ def _baseline_state(
             ),
         )
 
-    import pandapower as pp
-
     try:
-        pp.runpp(net, numba=False)
+        _run_pandapower_power_flow(net, request)
     except Exception:
         return _BaselineState(
             violations={("power_flow", -1, "converged"): 0.0},
@@ -1454,6 +1686,38 @@ def _baseline_state(
         max_loading_percent=_max_loading_percent(net),
         converged=True,
     )
+
+
+def _cached_baseline_state(
+    net: object,
+    bus_id: int,
+    settings: ConstraintSettings,
+    tracker: _QstsPerformanceTracker,
+    request: QstsRequest | None,
+) -> _BaselineState:
+    try:
+        return _baseline_state(net, bus_id, settings, tracker, request=request)
+    except TypeError as exc:
+        if "unexpected keyword argument 'request'" not in str(exc):
+            raise
+        return _baseline_state(net, bus_id, settings, tracker)
+
+
+def _run_pandapower_power_flow(net: object, request: QstsRequest | None) -> None:
+    import pandapower as pp
+
+    kwargs: dict[str, object] = {
+        "numba": request.pf_numba if request is not None else False,
+    }
+    algorithm = request.pf_algorithm if request is not None else "nr"
+    if algorithm:
+        kwargs["algorithm"] = algorithm
+    pf_init = request.pf_init if request is not None else "auto"
+    if pf_init != "auto":
+        kwargs["init"] = pf_init
+    if request is not None and request.pf_recycle:
+        kwargs["recycle"] = {"bus_pq": True, "trafo": False, "gen": False}
+    pp.runpp(net, **kwargs)
 
 
 def _baseline_violation_snapshot(
@@ -1530,11 +1794,8 @@ def _datetime_from_record_timestamp(timestamp: str) -> datetime:
         try:
             hour_index = int(timestamp)
         except (TypeError, ValueError):
-            return annual_timestamps(2026)[0]
-        timestamps = annual_timestamps(2026)
-        if 0 <= hour_index < len(timestamps):
-            return timestamps[hour_index]
-        return timestamps[hour_index % len(timestamps)]
+            return datetime(2026, 1, 1)
+        return datetime(2026, 1, 1) + timedelta(hours=hour_index % 8760)
 
 
 def _bus_envelope_comparisons(bus: QstsBusResult) -> tuple[QstsEnvelopeComparison, ...]:
@@ -1685,6 +1946,9 @@ def _risk_summary_row(row: QstsRiskSummaryRow) -> dict[str, object]:
         "qsts_verdict": row.qsts_verdict,
         "curtailment_hours": row.curtailment_hours,
         "expected_curtailment_mwh": f"{row.expected_curtailment_mwh:.6f}",
+        "sampled_curtailment_mwh": f"{row.sampled_curtailment_mwh:.6f}",
+        "weighted_curtailment_mwh": f"{row.weighted_curtailment_mwh:.6f}",
+        "curtailment_energy_ratio": f"{row.curtailment_energy_ratio:.6f}",
         "curtailment_p90_mw": f"{row.curtailment_p90_mw:.6f}",
         "curtailment_p95_mw": f"{row.curtailment_p95_mw:.6f}",
         "curtailment_p99_mw": f"{row.curtailment_p99_mw:.6f}",
@@ -1694,6 +1958,47 @@ def _risk_summary_row(row: QstsRiskSummaryRow) -> dict[str, object]:
         "dominant_constraint": row.dominant_constraint,
         "verdict_driver": row.verdict_driver,
         "tail_risk_flag": row.tail_risk_flag,
+    }
+
+
+def _qsts_economics_row(request: QstsRequest, bus: QstsBusResult) -> dict[str, object]:
+    economics = _qsts_bus_economics_proxy(request, bus)
+    return {
+        "bus_id": bus.bus_id,
+        "bus_name": bus.bus_name,
+        "qsts_verdict": bus.qsts_verdict,
+        "requested_mw": f"{bus.requested_mw:.6f}",
+        "storage_duration_hours": f"{economics.storage_duration_hours:.6f}",
+        "energy_capacity_mwh": f"{economics.energy_capacity_mwh:.6f}",
+        "capex_eur": f"{economics.capex_eur:.6f}",
+        "annual_gross_revenue_eur": f"{economics.annual_gross_revenue_eur:.6f}",
+        "annual_curtailment_loss_eur": f"{economics.annual_curtailment_loss_eur:.6f}",
+        "annual_fixed_opex_eur": f"{economics.annual_fixed_opex_eur:.6f}",
+        "annual_ebitda_proxy_eur": f"{economics.annual_ebitda_proxy_eur:.6f}",
+        "connect_now_value_eur": f"{economics.connect_now_value_eur:.6f}",
+        "wait_value_eur": f"{economics.wait_value_eur:.6f}",
+        "delta_npv_eur": f"{economics.delta_npv_eur:.6f}",
+    }
+
+
+def _decision_frontier_row(row: object) -> dict[str, object]:
+    return {
+        "bus_id": row.bus_id,
+        "bus_name": row.bus_name,
+        "policy": row.policy,
+        "qsts_p90_mw": f"{row.qsts_p90_mw:.6f}",
+        "p90_curtailment_ratio": f"{row.p90_curtailment_ratio:.6f}",
+        "weighted_curtailment_mwh": f"{row.weighted_curtailment_mwh:.6f}",
+        "curtailment_energy_ratio": f"{row.curtailment_energy_ratio:.6f}",
+        "max_event_hours": row.max_event_hours,
+        "max_event_mwh": f"{row.max_event_mwh:.6f}",
+        "max_event_mwh_per_mw": f"{row.max_event_mwh_per_mw:.6f}",
+        "policy_max_p90_ratio": f"{row.policy_definition.max_p90_ratio:.6f}",
+        "policy_max_energy_ratio": f"{row.policy_definition.max_energy_ratio:.6f}",
+        "policy_max_event_hours": row.policy_definition.max_event_hours,
+        "policy_max_event_mwh_per_mw": f"{row.policy_definition.max_event_mwh_per_mw:.6f}",
+        "frontier_verdict": row.frontier_verdict,
+        "validation_level": row.validation_level,
     }
 
 
@@ -1823,33 +2128,36 @@ def _driver_interpretation(verdict_driver: str, tail_risk_flag: bool) -> str:
 
 
 def _qsts_economics_proxy(result: QstsResult) -> QstsEconomicsProxy:
-    if not result.buses:
-        curtailed_mwh = 0.0
-    else:
-        curtailed_mwh = result.buses[0].curtailment.expected_mwh
-    requested_kw = result.request.requested_mw * 1000.0
-    energy_capacity_mwh = result.request.requested_mw * result.request.storage_duration_hours
-    capex = requested_kw * result.request.capex_eur_per_kw
-    annual_gross_revenue = (
-        result.request.requested_mw * result.request.gross_revenue_eur_per_mw_year
-    )
-    annual_curtailment_loss = curtailed_mwh * result.request.curtailment_penalty_eur_per_mwh
-    annual_fixed_opex = requested_kw * result.request.fixed_opex_eur_per_kw_year
+    bus = result.buses[0] if result.buses else None
+    return _qsts_bus_economics_proxy(result.request, bus)
+
+
+def _qsts_bus_economics_proxy(
+    request: QstsRequest,
+    bus: QstsBusResult | None,
+) -> QstsEconomicsProxy:
+    curtailed_mwh = bus.weighted_curtailment_mwh if bus is not None else 0.0
+    requested_kw = request.requested_mw * 1000.0
+    energy_capacity_mwh = request.requested_mw * request.storage_duration_hours
+    capex = requested_kw * request.capex_eur_per_kw
+    annual_gross_revenue = request.requested_mw * request.gross_revenue_eur_per_mw_year
+    annual_curtailment_loss = curtailed_mwh * request.curtailment_penalty_eur_per_mwh
+    annual_fixed_opex = requested_kw * request.fixed_opex_eur_per_kw_year
     annual_ebitda = annual_gross_revenue - annual_curtailment_loss - annual_fixed_opex
     connect_now_value = _discounted_annuity(
         annual_ebitda,
-        years=result.request.reinforcement_wait_years,
-        discount_rate=result.request.discount_rate,
+        years=request.reinforcement_wait_years,
+        discount_rate=request.discount_rate,
     )
     wait_value = _discounted_annuity(
         annual_gross_revenue - annual_fixed_opex,
-        years=result.request.reinforcement_wait_years,
-        discount_rate=result.request.discount_rate,
+        years=request.reinforcement_wait_years,
+        discount_rate=request.discount_rate,
     )
     return QstsEconomicsProxy(
-        storage_duration_hours=round(result.request.storage_duration_hours, 6),
-        reinforcement_wait_years=round(result.request.reinforcement_wait_years, 6),
-        discount_rate=round(result.request.discount_rate, 6),
+        storage_duration_hours=round(request.storage_duration_hours, 6),
+        reinforcement_wait_years=round(request.reinforcement_wait_years, 6),
+        discount_rate=round(request.discount_rate, 6),
         energy_capacity_mwh=round(energy_capacity_mwh, 6),
         capex_eur=round(capex, 6),
         annual_gross_revenue_eur=round(annual_gross_revenue, 6),
@@ -1896,6 +2204,26 @@ def _render_qsts_investment_table(
             f"{bus.curtailment.p90_mw:.3f} | "
             f"{bus.curtailment.expected_mwh:.3f} | "
             f"{bus.main_recurring_constraint or '-'} |"
+        )
+    return "\n".join(lines)
+
+
+def _render_qsts_economics_table(result: QstsResult) -> str:
+    if not result.buses:
+        return "No per-bus economics rows available."
+    lines = [
+        "| bus_id | verdict | weighted_mwh | annual_curtailment_loss | annual_ebitda_proxy | connect_now_value | wait_value | delta_npv |",
+        "| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for bus in result.buses:
+        economics = _qsts_bus_economics_proxy(result.request, bus)
+        lines.append(
+            "| "
+            f"{bus.bus_id} | {bus.qsts_verdict} | {bus.weighted_curtailment_mwh:.3f} | "
+            f"{economics.annual_curtailment_loss_eur:.2f} | "
+            f"{economics.annual_ebitda_proxy_eur:.2f} | "
+            f"{economics.connect_now_value_eur:.2f} | "
+            f"{economics.wait_value_eur:.2f} | {economics.delta_npv_eur:.2f} |"
         )
     return "\n".join(lines)
 
@@ -2039,25 +2367,25 @@ def _max_curtailment_event(frame: pd.DataFrame) -> tuple[int, float]:
     worst_index = frame.groupby("timestamp")["curtailed_mw"].idxmax()
     worst = frame.loc[worst_index].copy()
     worst["curtailed_mw"] = worst["curtailed_mw"].astype(float).clip(lower=0.0)
-    worst = worst.sort_values("timestamp")
+    worst["event_timestamp"] = worst["timestamp"].map(_datetime_from_record_timestamp)
+    worst = worst.sort_values("event_timestamp")
     max_hours = 0
     max_mwh = 0.0
     current_hours = 0
     current_mwh = 0.0
-    previous_timestamp: pd.Timestamp | None = None
+    previous_timestamp: datetime | None = None
     for item in worst.itertuples(index=False):
-        timestamp = pd.to_datetime(item.timestamp, errors="coerce")
+        timestamp = item.event_timestamp
         curtailed_mw = float(item.curtailed_mw)
         consecutive = (
             current_hours > 0
-            and not pd.isna(timestamp)
             and previous_timestamp is not None
             and (timestamp - previous_timestamp).total_seconds() == 3600
         )
         if curtailed_mw <= 1e-9:
             current_hours = 0
             current_mwh = 0.0
-            previous_timestamp = timestamp if not pd.isna(timestamp) else None
+            previous_timestamp = timestamp
             continue
         if not consecutive:
             current_hours = 0
@@ -2066,8 +2394,12 @@ def _max_curtailment_event(frame: pd.DataFrame) -> tuple[int, float]:
         current_mwh += curtailed_mw
         max_hours = max(max_hours, current_hours)
         max_mwh = max(max_mwh, current_mwh)
-        previous_timestamp = timestamp if not pd.isna(timestamp) else None
+        previous_timestamp = timestamp
     return max_hours, round(max_mwh, 6)
+
+
+def _bus_max_curtailment_event(bus: QstsBusResult) -> tuple[int, float]:
+    return _max_curtailment_event(pd.DataFrame(asdict(record) for record in bus.hourly_records))
 
 
 def _max_optional(current: float | None, candidate: float | None) -> float | None:
@@ -2320,6 +2652,9 @@ def _bus_result_row(
         "feasible_hours": bus.feasible_hours,
         "violation_hours": bus.violation_hours,
         "expected_curtailment_mwh": f"{bus.curtailment.expected_mwh:.6f}",
+        "sampled_curtailment_mwh": f"{bus.sampled_curtailment_mwh:.6f}",
+        "weighted_curtailment_mwh": f"{bus.weighted_curtailment_mwh:.6f}",
+        "curtailment_energy_ratio": f"{bus.curtailment_energy_ratio:.6f}",
         "p50_curtailment_mw": f"{bus.curtailment.p50_mw:.6f}",
         "p90_curtailment_mw": f"{bus.curtailment.p90_mw:.6f}",
         "main_recurring_constraint": bus.main_recurring_constraint,
@@ -2353,6 +2688,9 @@ def _investor_decision_row(
         "static_conditional_capacity_mw": f"{bus.static_conditional_capacity_mw:.6f}",
         "qsts_p90_curtailment_mw": f"{bus.curtailment.p90_mw:.6f}",
         "qsts_expected_curtailment_mwh": f"{bus.curtailment.expected_mwh:.6f}",
+        "sampled_curtailment_mwh": f"{bus.sampled_curtailment_mwh:.6f}",
+        "weighted_curtailment_mwh": f"{bus.weighted_curtailment_mwh:.6f}",
+        "curtailment_energy_ratio": f"{bus.curtailment_energy_ratio:.6f}",
         "main_recurring_constraint": bus.main_recurring_constraint,
     }
 

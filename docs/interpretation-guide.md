@@ -11,6 +11,12 @@ for readers who do not need to inspect the source code.
 - `no-go`: requested MW exceeds firm or conditional acceptance, or the QSTS risk exceeds
   at least one configured tolerance.
 
+`qsts_verdict` is a legacy QSTS verdict based on configured absolute P90 MW and MWh
+tolerances. When `decision_frontier.csv` is available, the investor-facing verdict should
+come from the selected policy frontier, defaulting to `standard`. Use `flexible` as an
+explicit alternative commercial appetite, not as a silent replacement for the default
+decision.
+
 QSTS verdicts are baseline-aware. Pre-existing network violations are reported, but they
 do not trigger candidate curtailment unless the BESS creates a new violation or worsens an
 existing one.
@@ -25,16 +31,24 @@ Use `docs/decision-policy.md` for the current rule that separates `screening_onl
   proxy.
 - `qsts_p90_curtailment_mw`: 90th percentile of QSTS curtailed MW.
 - `expected_curtailment_mwh`: total curtailed MWh over the evaluated QSTS sample.
+- `sampled_curtailment_mwh`: raw curtailed MWh over evaluated timestamps.
+- `weighted_curtailment_mwh`: curtailed MWh used for the QSTS verdict; stratified
+  samples are weighted to represent month/time-block exposure.
+- `curtailment_energy_ratio`: weighted curtailed MWh divided by requested annual MWh.
+- `p90_curtailment_ratio`: QSTS P90 MW divided by requested MW, used by the decision
+  frontier to compare projects of different sizes.
 - `curtailment_p95_mw`, `curtailment_p99_mw`, `curtailment_max_mw`: tail-risk metrics
   used to expose rare but severe events.
 - `max_event_hours` and `max_event_mwh`: longest contiguous curtailment event and its
   curtailed energy.
+- `max_event_mwh_per_mw`: longest event energy normalized by requested MW.
 - `main_recurring_constraint` or `dominant_constraint`: most frequent candidate-caused
   network constraint.
 - `validation_level`: evidence layer behind the verdict.
 - `decision_confidence`: `low`, `medium`, or `high`, based on the validation level.
 - `recommended_next_action`: next product action before using the verdict commercially.
 - `evaluated_bus_hours`: QSTS bus-time workload metric used for runtime planning.
+- `evaluated_time_steps`: unique timestamps evaluated; this is distinct from bus-hours.
 - `power_flow_calls_per_bus_hour`: rough compute intensity indicator for full-year
   validation campaigns.
 
@@ -44,6 +58,11 @@ Use `docs/decision-policy.md` for the current rule that separates `screening_onl
 - `screening_summary.md`: human-readable static screening summary.
 - `qsts_results.csv`: QSTS verdict and core risk metrics per evaluated bus.
 - `qsts_risk_summary.csv`: tail-risk and verdict-driver diagnostics.
+- `qsts_economics.csv`: per-bus proxy economics.
+- `decision_frontier.csv`: strict, standard, flexible, and aggressive policy
+  reclassification using weighted MWh and energy ratio.
+- `validation_matrix.csv`: selected-policy final decision plus the legacy QSTS verdict
+  for comparison.
 - `qsts_envelope.csv`: hourly QSTS-derived allowed MW and curtailed MW.
 - `contractual_envelope.csv`: compact direction, season, and time-block envelope.
 - `static_vs_qsts_comparison.csv`: direct comparison between static proxy and QSTS

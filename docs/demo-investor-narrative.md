@@ -49,7 +49,7 @@ message is:
 The most actionable output is not just `no-go`. It is:
 
 > The requested 5 MW project is not acceptable at bus 24, but 2 MW is acceptable under
-> the configured QSTS tolerances.
+> the selected decision-frontier policy.
 
 This turns network constraints into an investment decision.
 
