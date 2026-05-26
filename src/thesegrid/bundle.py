@@ -88,6 +88,11 @@ def render_bundle_html(bundle_dir: Path) -> str:
     validation = _read_csv(bundle_dir / "validation_matrix.csv")
     resize = _read_csv(bundle_dir / "resize_results.csv")
     qsts = _read_csv(bundle_dir / "qsts_results.csv")
+    sensitivity = _read_csv(bundle_dir / "sensitivity_results.csv")
+    full_year_conditional = _read_csv(bundle_dir / "full_year_conditional_results.csv")
+    full_year_additional = _read_csv(bundle_dir / "full_year_additional_results.csv")
+    full_year_checks = full_year_additional or full_year_conditional
+    full_year_candidates = _read_csv(bundle_dir / "full_year_candidate_selection.csv")
     economic_scenarios = _economic_scenarios(bundle_dir)
     scorecard = render_bundle_scorecard(bundle_dir)
     metrics = _bundle_metrics(validation, resize, qsts, bundle_dir)
@@ -179,6 +184,12 @@ def render_bundle_html(bundle_dir: Path) -> str:
     </section>
 
     <section>
+      <h2>Benchmark Status</h2>
+      <p class="notice">This bundle uses a SimBench benchmark network. It proves the workflow and decision logic, not the feasibility of a real French site.</p>
+      <p>The commercial next step is to run the same workflow on a client, consultant, reconstructed public, or operator-validated network model with explicit data-source labels.</p>
+    </section>
+
+    <section>
       <h2>Scorecard</h2>
       <div class="scorecard">{html.escape(scorecard)}</div>
     </section>
@@ -191,6 +202,20 @@ def render_bundle_html(bundle_dir: Path) -> str:
       {_html_table(qsts)}
       <h3>Resize Evidence</h3>
       {_html_table(resize)}
+    </section>
+
+    <section>
+      <h2>Decision Matrix</h2>
+      <p class="notice">This matrix is stratified QSTS evidence when generated from the bus-by-MW sweep. Full-year QSTS is required before using any go verdict as investor-grade evidence.</p>
+      {_render_decision_matrix(sensitivity)}
+      <h3>Recommended MW by Bus</h3>
+      {_render_recommended_mw_by_bus(sensitivity)}
+      <h3>Full-Year Conditional Checks</h3>
+      {_render_full_year_conditional_checks(full_year_checks)}
+      <h3>Decision Frontier</h3>
+      {_render_decision_frontier(_frontier_rows(qsts, full_year_checks))}
+      <h3>Next Full-Year Candidates</h3>
+      {_render_next_full_year_candidates(full_year_candidates)}
     </section>
 
     <section>
@@ -295,6 +320,259 @@ def _badge(label: str, class_name: str) -> str:
 
 def _artifact_link(filename: str) -> str:
     return f'<a href="{html.escape(filename)}">Open {html.escape(filename)}</a>'
+
+
+def _render_decision_matrix(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return (
+            "<p>No bus-by-MW sweep results available yet. Run "
+            "<code>thesegrid qsts-sweep --config experiments/bus_power_matrix_2026-05-22.json "
+            "--output results/&lt;run_id&gt;</code>, then copy or aggregate "
+            "<code>sensitivity_results.csv</code> into the investor bundle.</p>"
+        )
+
+    matrix: dict[str, dict[str, str]] = {}
+    bus_names: dict[str, str] = {}
+    requested_values: set[float] = set()
+    for row in rows:
+        if row.get("sampling_mode") not in {"", "stratified", "full_year"}:
+            continue
+        bus_id = row.get("bus_id", "")
+        if not bus_id:
+            continue
+        requested_mw = _float_or_none(row.get("requested_mw"))
+        if requested_mw is None:
+            continue
+        requested_values.add(requested_mw)
+        bus_names[bus_id] = row.get("bus_name", "")
+        verdict = row.get("qsts_verdict", "")
+        p90 = row.get("qsts_p90_curtailment_mw", "")
+        mwh = row.get("qsts_expected_curtailment_mwh", "")
+        matrix.setdefault(bus_id, {})[_format_mw_header(requested_mw)] = (
+            f"{verdict}<br><small>P90 {html.escape(p90)} MW / "
+            f"{html.escape(mwh)} MWh</small>"
+        )
+
+    if not matrix:
+        return "<p>No usable decision matrix rows available.</p>"
+
+    mw_headers = [_format_mw_header(value) for value in sorted(requested_values)]
+    header = "<th>bus_id</th><th>bus_name</th>" + "".join(
+        f"<th>{html.escape(header)}</th>" for header in mw_headers
+    )
+    body_rows = []
+    for bus_id in sorted(matrix, key=lambda value: int(value) if value.isdigit() else value):
+        cells = [
+            f"<td>{html.escape(bus_id)}</td>",
+            f"<td>{html.escape(bus_names.get(bus_id, ''))}</td>",
+        ]
+        for header_label in mw_headers:
+            cells.append(f"<td>{matrix[bus_id].get(header_label, '')}</td>")
+        body_rows.append(f"<tr>{''.join(cells)}</tr>")
+    return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(body_rows)}</tbody></table>"
+
+
+def _render_recommended_mw_by_bus(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return "<p>No bus-by-MW recommendation rows available yet.</p>"
+
+    best_by_bus: dict[str, dict[str, str]] = {}
+    bus_names: dict[str, str] = {}
+    seen_buses: set[str] = set()
+    for row in rows:
+        bus_id = row.get("bus_id", "")
+        if not bus_id:
+            continue
+        seen_buses.add(bus_id)
+        bus_names[bus_id] = row.get("bus_name", "")
+        if row.get("qsts_verdict") not in {"go", "go-with-conditions"}:
+            continue
+        requested_mw = _float_or_none(row.get("requested_mw"))
+        if requested_mw is None:
+            continue
+        current = best_by_bus.get(bus_id)
+        current_mw = _float_or_none(current.get("recommended_mw") if current else None)
+        if current is None or current_mw is None or requested_mw > current_mw:
+            best_by_bus[bus_id] = {
+                "recommended_mw": f"{requested_mw:.6f}",
+                "qsts_verdict": row.get("qsts_verdict", ""),
+                "sampling_mode": row.get("sampling_mode", ""),
+                "qsts_p90_curtailment_mw": row.get("qsts_p90_curtailment_mw", ""),
+                "qsts_expected_curtailment_mwh": row.get("qsts_expected_curtailment_mwh", ""),
+                "main_recurring_constraint": row.get("main_recurring_constraint", ""),
+            }
+
+    table_rows: list[dict[str, str]] = []
+    for bus_id in sorted(seen_buses, key=lambda value: int(value) if value.isdigit() else value):
+        best = best_by_bus.get(bus_id)
+        if best is None:
+            table_rows.append(
+                {
+                    "bus_id": bus_id,
+                    "bus_name": bus_names.get(bus_id, ""),
+                    "recommended_mw": "",
+                    "evidence_verdict": "no acceptable stratified MW",
+                    "p90_mw": "",
+                    "expected_mwh": "",
+                    "recommended_next_action": "reject_or_test_lower_mw",
+                }
+            )
+            continue
+        verdict = best["qsts_verdict"]
+        next_action = (
+            "run_full_year_conditional_validation"
+            if verdict == "go-with-conditions"
+            else "run_full_year_validation"
+        )
+        table_rows.append(
+            {
+                "bus_id": bus_id,
+                "bus_name": bus_names.get(bus_id, ""),
+                "recommended_mw": _format_mw_header(float(best["recommended_mw"])),
+                "evidence_verdict": verdict,
+                "p90_mw": best["qsts_p90_curtailment_mw"],
+                "expected_mwh": best["qsts_expected_curtailment_mwh"],
+                "recommended_next_action": next_action,
+            }
+        )
+    return _html_table(table_rows)
+
+
+def _render_full_year_conditional_checks(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return (
+            "<p>No targeted full-year conditional validation rows are available yet. "
+            "Use this section for cases that looked acceptable in stratified QSTS and "
+            "need full-year confirmation.</p>"
+        )
+    return _html_table(rows)
+
+
+DECISION_POLICIES = (
+    {
+        "policy": "strict",
+        "max_p90_mw": 0.5,
+        "max_mwh": 60.0,
+        "max_energy_ratio": 0.005,
+    },
+    {
+        "policy": "standard",
+        "max_p90_mw": 1.0,
+        "max_mwh": 120.0,
+        "max_energy_ratio": 0.01,
+    },
+    {
+        "policy": "flexible",
+        "max_p90_mw": 3.0,
+        "max_mwh": 500.0,
+        "max_energy_ratio": 0.02,
+    },
+    {
+        "policy": "aggressive",
+        "max_p90_mw": 3.0,
+        "max_mwh": 1000.0,
+        "max_energy_ratio": 0.05,
+    },
+)
+
+
+def _frontier_rows(
+    qsts_rows: list[dict[str, str]],
+    full_year_conditional_rows: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    rows = [_normalize_frontier_row(row) for row in qsts_rows]
+    rows.extend(_normalize_frontier_row(row) for row in full_year_conditional_rows)
+    return [row for row in rows if row]
+
+
+def _normalize_frontier_row(row: dict[str, str]) -> dict[str, str]:
+    requested_mw = _float_or_none(row.get("requested_mw"))
+    p90_mw = _float_or_none(
+        row.get("qsts_p90_curtailment_mw") or row.get("p90_curtailment_mw")
+    )
+    expected_mwh = _float_or_none(
+        row.get("qsts_expected_curtailment_mwh") or row.get("expected_curtailment_mwh")
+    )
+    if requested_mw is None or p90_mw is None or expected_mwh is None:
+        return {}
+    theoretical_mwh = requested_mw * 8760.0
+    energy_ratio = expected_mwh / theoretical_mwh if theoretical_mwh > 0 else 0.0
+    return {
+        "bus_id": row.get("bus_id", ""),
+        "bus_name": row.get("bus_name", ""),
+        "requested_mw": _format_mw_header(requested_mw),
+        "source_verdict": row.get("qsts_verdict", ""),
+        "source_sampling": row.get("sampling_mode") or row.get("validation_level", ""),
+        "p90_mw": f"{p90_mw:.6f}",
+        "expected_mwh": f"{expected_mwh:.6f}",
+        "curtailment_energy_ratio": f"{energy_ratio:.3%}",
+        **{
+            str(policy["policy"]): _policy_verdict(
+                p90_mw=p90_mw,
+                expected_mwh=expected_mwh,
+                energy_ratio=energy_ratio,
+                max_p90_mw=float(policy["max_p90_mw"]),
+                max_mwh=float(policy["max_mwh"]),
+                max_energy_ratio=float(policy["max_energy_ratio"]),
+            )
+            for policy in DECISION_POLICIES
+        },
+    }
+
+
+def _render_decision_frontier(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return (
+            "<p>No full-year rows are available for decision-frontier analysis yet. "
+            "Run targeted full-year validation before using this table.</p>"
+        )
+    return (
+        "<p>This table reclassifies full-year evidence under several curtailment-risk "
+        "policies. It is a sensitivity layer, not an official network-operator verdict.</p>"
+        + _html_table(rows)
+    )
+
+
+def _render_next_full_year_candidates(rows: list[dict[str, str]]) -> str:
+    if not rows:
+        return (
+            "<p>No automatic full-year candidate selection is available yet. Run "
+            "<code>thesegrid select-full-year-candidates</code> after screening and "
+            "stratified QSTS.</p>"
+        )
+    return _html_table(rows)
+
+
+def _policy_verdict(
+    p90_mw: float,
+    expected_mwh: float,
+    energy_ratio: float,
+    max_p90_mw: float,
+    max_mwh: float,
+    max_energy_ratio: float,
+) -> str:
+    if p90_mw <= 1e-9 and expected_mwh <= 1e-9:
+        return "go"
+    if (
+        p90_mw <= max_p90_mw + 1e-9
+        and expected_mwh <= max_mwh + 1e-9
+        and energy_ratio <= max_energy_ratio + 1e-9
+    ):
+        return "go-with-conditions"
+    return "no-go"
+
+
+def _format_mw_header(value: float) -> str:
+    return f"{value:.0f} MW" if value.is_integer() else f"{value:.3f} MW"
+
+
+def _float_or_none(value: str | None) -> float | None:
+    if value in {None, ""}:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        return None
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

@@ -13,6 +13,11 @@ from typing import Sequence
 from thesegrid.assessment import assess_connection
 from thesegrid.bundle import write_bundle_report
 from thesegrid.constraints import ConstraintSettings
+from thesegrid.full_year_selection import (
+    FullYearSelectionRequest,
+    select_full_year_candidates,
+    write_full_year_selection_csv,
+)
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
 from thesegrid.qsts import (
@@ -45,6 +50,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _qsts_sweep(args)
     if args.command == "compare-validation":
         return _compare_validation(args)
+    if args.command == "select-full-year-candidates":
+        return _select_full_year_candidates(args)
     if args.command == "render-bundle":
         return _render_bundle(args)
     parser.print_help()
@@ -229,6 +236,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="One or more full-year QSTS results CSV paths",
     )
     compare.add_argument("--output", required=True, type=Path, help="Output directory")
+    select_full_year = subparsers.add_parser(
+        "select-full-year-candidates",
+        help="Select a balanced set of QSTS full-year candidates",
+    )
+    select_full_year.add_argument("--screening-csv", required=True, type=Path)
+    select_full_year.add_argument("--stratified-csv", type=Path)
+    select_full_year.add_argument("--validation-matrix-csv", type=Path)
+    select_full_year.add_argument("--output", required=True, type=Path)
+    select_full_year.add_argument("--max-candidates", type=int, default=8)
+    select_full_year.add_argument("--top-candidates", type=int, default=3)
+    select_full_year.add_argument("--borderline-candidates", type=int, default=3)
+    select_full_year.add_argument("--false-positive-suspects", type=int, default=1)
+    select_full_year.add_argument("--bad-controls", type=int, default=1)
     bundle = subparsers.add_parser(
         "render-bundle",
         help="Render HTML report, scorecard, and next-campaign guide for an investor bundle",
@@ -486,6 +506,24 @@ def _compare_validation(args: argparse.Namespace) -> int:
     )
     outputs = write_validation_matrix_outputs(matrix, args.output)
     print(f"validation matrix: {outputs.csv_path} {outputs.markdown_path}")
+    return 0
+
+
+def _select_full_year_candidates(args: argparse.Namespace) -> int:
+    candidates = select_full_year_candidates(
+        FullYearSelectionRequest(
+            screening_csv=args.screening_csv,
+            stratified_csv=args.stratified_csv,
+            validation_matrix_csv=args.validation_matrix_csv,
+            max_candidates=args.max_candidates,
+            top_candidates=args.top_candidates,
+            borderline_candidates=args.borderline_candidates,
+            false_positive_suspects=args.false_positive_suspects,
+            bad_controls=args.bad_controls,
+        )
+    )
+    output = write_full_year_selection_csv(candidates, args.output)
+    print(f"full-year candidate selection: {output}")
     return 0
 
 
