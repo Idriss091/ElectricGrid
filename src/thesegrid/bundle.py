@@ -325,9 +325,7 @@ def render_bundle_html(bundle_dir: Path) -> str:
 
 
 def render_next_calibration_campaign(bundle_dir: Path) -> str:
-    validation = _read_csv(bundle_dir / "validation_matrix.csv")
-    candidate_buses = ", ".join(row.get("bus_id", "") for row in validation if row.get("bus_id"))
-    return f"""# Next Calibration Campaign
+    return """# Next Calibration Campaign
 
 ## Goal
 
@@ -337,10 +335,14 @@ focused on BESS France and buyer-side pre-feasibility.
 ## Recommended Matrix
 
 - Network: add 1-2 additional SimBench MV networks after `1-MV-rural--0-sw`.
-- Buses: start with current evidence buses ({candidate_buses}) and the top 3 buses from each new screening.
+- Buses: screen all eligible MV buses, run 3-bus short QSTS smoke checks, run stratified
+  QSTS on a balanced 10-12 bus shortlist, then run full-year QSTS on 3-5 final or
+  calibration buses.
 - Requested MW values: 2, 3, 5, and 7 MW.
 - Tolerances: P90 = 0, 1, 3 MW; expected MWh = 0, 60, 120 MWh.
-- Evidence levels: screening, stratified QSTS, and full-year QSTS for cases where stratified evidence is acceptable or ambiguous.
+- Evidence levels: screening for all candidates, short QSTS for smoke validation,
+  stratified QSTS for shortlist comparison, and full-year QSTS only for final
+  candidates or calibration controls.
 
 ## Execution Rule
 

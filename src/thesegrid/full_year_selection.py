@@ -5,16 +5,23 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 
+DEFAULT_FULL_YEAR_MAX_CANDIDATES = 5
+DEFAULT_FULL_YEAR_TOP_CANDIDATES = 2
+DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES = 2
+DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS = 0
+DEFAULT_FULL_YEAR_BAD_CONTROLS = 1
+
+
 @dataclass(frozen=True)
 class FullYearSelectionRequest:
     screening_csv: Path
     stratified_csv: Path | None = None
     validation_matrix_csv: Path | None = None
-    max_candidates: int = 8
-    top_candidates: int = 3
-    borderline_candidates: int = 3
-    false_positive_suspects: int = 1
-    bad_controls: int = 1
+    max_candidates: int = DEFAULT_FULL_YEAR_MAX_CANDIDATES
+    top_candidates: int = DEFAULT_FULL_YEAR_TOP_CANDIDATES
+    borderline_candidates: int = DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES
+    false_positive_suspects: int = DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS
+    bad_controls: int = DEFAULT_FULL_YEAR_BAD_CONTROLS
 
     def __post_init__(self) -> None:
         if self.max_candidates <= 0:

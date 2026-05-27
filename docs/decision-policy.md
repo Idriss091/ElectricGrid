@@ -19,6 +19,27 @@ QSTS outputs now include:
 - `decision_confidence`;
 - `recommended_next_action`.
 
+## Evidence Funnel
+
+Do not run every validation layer on every bus. The MVP uses a staged funnel:
+
+| stage | normal scale | decision role |
+| --- | ---: | --- |
+| screening | all eligible buses | triage and ranking |
+| QSTS short | 3 buses | technical smoke validation only |
+| QSTS stratified | 8-15 buses, normally 10-12 for the current benchmark | pre-demo comparison |
+| QSTS full-year | 3-5 buses | investor reference |
+| memo | 1-2 sites | commercial recommendation |
+
+Short QSTS should cover a top candidate, a borderline candidate, and a constrained
+control. Stratified QSTS should be balanced across top-ranked, borderline,
+near-threshold no-go, and electrically diverse candidates. Full-year QSTS should be
+reserved for final sites and calibration controls.
+
+`thesegrid select-stratified-candidates` implements the screening-to-stratified
+shortlist. Its default target is 12 buses: 5 top screening `go`, 3 borderline
+`go-with-conditions`, 2 near-threshold `no-go`, and 2 constraint-diverse controls.
+
 ## Confidence
 
 - `low`: QSTS short run. A clean result still needs annual validation.

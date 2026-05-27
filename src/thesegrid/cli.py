@@ -15,6 +15,11 @@ from thesegrid.assessment import assess_connection
 from thesegrid.bundle import write_bundle_report
 from thesegrid.constraints import ConstraintSettings
 from thesegrid.full_year_selection import (
+    DEFAULT_FULL_YEAR_BAD_CONTROLS,
+    DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES,
+    DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS,
+    DEFAULT_FULL_YEAR_MAX_CANDIDATES,
+    DEFAULT_FULL_YEAR_TOP_CANDIDATES,
     FullYearSelectionRequest,
     select_full_year_candidates,
     write_full_year_selection_csv,
@@ -34,6 +39,16 @@ from thesegrid.qsts import (
     write_qsts_outputs,
 )
 from thesegrid.screening import ScreeningRequest, screen_connections, write_screening_outputs
+from thesegrid.stratified_selection import (
+    DEFAULT_STRATIFIED_BORDERLINE_CANDIDATES,
+    DEFAULT_STRATIFIED_CONSTRAINT_DIVERSE_CANDIDATES,
+    DEFAULT_STRATIFIED_MAX_CANDIDATES,
+    DEFAULT_STRATIFIED_NEAR_THRESHOLD_NO_GO_CANDIDATES,
+    DEFAULT_STRATIFIED_TOP_GO_CANDIDATES,
+    StratifiedSelectionRequest,
+    select_stratified_candidates,
+    write_stratified_selection_csv,
+)
 from thesegrid.validation_matrix import build_validation_matrix, write_validation_matrix_outputs
 
 
@@ -57,6 +72,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _qsts_sweep(args)
     if args.command == "compare-validation":
         return _compare_validation(args)
+    if args.command == "select-stratified-candidates":
+        return _select_stratified_candidates(args)
     if args.command == "select-full-year-candidates":
         return _select_full_year_candidates(args)
     if args.command == "render-bundle":
@@ -133,6 +150,11 @@ def _build_parser() -> argparse.ArgumentParser:
     qsts.add_argument(
         "--bus-ids",
         help="Comma-separated screening bus IDs to validate; overrides --top-n selection",
+    )
+    qsts.add_argument(
+        "--bus-ids-csv",
+        type=Path,
+        help="CSV with a bus_id column to validate; ignored when --bus-ids is provided",
     )
     qsts.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
     qsts.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
@@ -282,6 +304,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Policy used as final_decision when decision frontier rows are available",
     )
     compare.add_argument("--output", required=True, type=Path, help="Output directory")
+    select_stratified = subparsers.add_parser(
+        "select-stratified-candidates",
+        help="Select a balanced set of buses for stratified QSTS",
+    )
+    select_stratified.add_argument("--screening-csv", required=True, type=Path)
+    select_stratified.add_argument("--output", required=True, type=Path)
+    select_stratified.add_argument("--max-candidates", type=int, default=DEFAULT_STRATIFIED_MAX_CANDIDATES)
+    select_stratified.add_argument("--top-go-candidates", type=int, default=DEFAULT_STRATIFIED_TOP_GO_CANDIDATES)
+    select_stratified.add_argument(
+        "--borderline-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_BORDERLINE_CANDIDATES,
+    )
+    select_stratified.add_argument(
+        "--near-threshold-no-go-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_NEAR_THRESHOLD_NO_GO_CANDIDATES,
+    )
+    select_stratified.add_argument(
+        "--constraint-diverse-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_CONSTRAINT_DIVERSE_CANDIDATES,
+    )
     select_full_year = subparsers.add_parser(
         "select-full-year-candidates",
         help="Select a balanced set of QSTS full-year candidates",
@@ -290,11 +335,19 @@ def _build_parser() -> argparse.ArgumentParser:
     select_full_year.add_argument("--stratified-csv", type=Path)
     select_full_year.add_argument("--validation-matrix-csv", type=Path)
     select_full_year.add_argument("--output", required=True, type=Path)
-    select_full_year.add_argument("--max-candidates", type=int, default=8)
-    select_full_year.add_argument("--top-candidates", type=int, default=3)
-    select_full_year.add_argument("--borderline-candidates", type=int, default=3)
-    select_full_year.add_argument("--false-positive-suspects", type=int, default=1)
-    select_full_year.add_argument("--bad-controls", type=int, default=1)
+    select_full_year.add_argument("--max-candidates", type=int, default=DEFAULT_FULL_YEAR_MAX_CANDIDATES)
+    select_full_year.add_argument("--top-candidates", type=int, default=DEFAULT_FULL_YEAR_TOP_CANDIDATES)
+    select_full_year.add_argument(
+        "--borderline-candidates",
+        type=int,
+        default=DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES,
+    )
+    select_full_year.add_argument(
+        "--false-positive-suspects",
+        type=int,
+        default=DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS,
+    )
+    select_full_year.add_argument("--bad-controls", type=int, default=DEFAULT_FULL_YEAR_BAD_CONTROLS)
     bundle = subparsers.add_parser(
         "render-bundle",
         help="Render HTML report, scorecard, and next-campaign guide for an investor bundle",
@@ -312,6 +365,11 @@ def _add_qsts_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--bus-ids",
         help="Comma-separated screening bus IDs to validate; overrides --top-n selection",
+    )
+    parser.add_argument(
+        "--bus-ids-csv",
+        type=Path,
+        help="CSV with a bus_id column to validate; ignored when --bus-ids is provided",
     )
     parser.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
     parser.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
@@ -495,7 +553,7 @@ def _qsts_request_from_args(
         screening_csv=args.screening_csv,
         requested_mw=args.requested_mw if requested_mw is None else requested_mw,
         top_n=args.top_n,
-        bus_ids=_parse_bus_ids(args.bus_ids) if bus_ids is None else bus_ids,
+        bus_ids=_qsts_bus_ids_from_args(args) if bus_ids is None else bus_ids,
         asset=args.asset,
         start_hour=args.start_hour,
         duration_hours=args.duration_hours,
@@ -857,6 +915,22 @@ def _compare_validation(args: argparse.Namespace) -> int:
     )
     outputs = write_validation_matrix_outputs(matrix, args.output)
     print(f"validation matrix: {outputs.csv_path} {outputs.markdown_path}")
+    return 0
+
+
+def _select_stratified_candidates(args: argparse.Namespace) -> int:
+    candidates = select_stratified_candidates(
+        StratifiedSelectionRequest(
+            screening_csv=args.screening_csv,
+            max_candidates=args.max_candidates,
+            top_go_candidates=args.top_go_candidates,
+            borderline_candidates=args.borderline_candidates,
+            near_threshold_no_go_candidates=args.near_threshold_no_go_candidates,
+            constraint_diverse_candidates=args.constraint_diverse_candidates,
+        )
+    )
+    output = write_stratified_selection_csv(candidates, args.output)
+    print(f"stratified candidate selection: {output}")
     return 0
 
 
@@ -1299,6 +1373,35 @@ def _parse_bus_ids(value: str | None) -> tuple[int, ...]:
         if not item:
             continue
         bus_ids.append(int(item))
+    return tuple(bus_ids)
+
+
+def _qsts_bus_ids_from_args(args: argparse.Namespace) -> tuple[int, ...]:
+    explicit = _parse_bus_ids(args.bus_ids)
+    if explicit:
+        return explicit
+    csv_path = getattr(args, "bus_ids_csv", None)
+    if csv_path is None:
+        return ()
+    return _parse_bus_ids_csv(csv_path)
+
+
+def _parse_bus_ids_csv(path: Path) -> tuple[int, ...]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    if rows and "bus_id" not in rows[0]:
+        raise ValueError("bus IDs CSV must include a bus_id column")
+    bus_ids: list[int] = []
+    seen: set[int] = set()
+    for row in rows:
+        value = row.get("bus_id", "").strip()
+        if not value:
+            continue
+        bus_id = int(value)
+        if bus_id in seen:
+            continue
+        seen.add(bus_id)
+        bus_ids.append(bus_id)
     return tuple(bus_ids)
 
 

@@ -104,6 +104,62 @@ def test_select_full_year_candidates_uses_top_borderline_suspect_and_control_buc
     ]
 
 
+def test_select_full_year_candidates_defaults_to_small_balanced_finalist_set(tmp_path):
+    screening = tmp_path / "screening.csv"
+    stratified = tmp_path / "sensitivity_results.csv"
+    _write_csv(
+        screening,
+        [
+            "rank",
+            "bus_id",
+            "bus_name",
+            "verdict",
+            "evaluated_conditional_mw",
+        ],
+        [
+            {"rank": "1", "bus_id": "2", "bus_name": "bus 2", "verdict": "go", "evaluated_conditional_mw": "5.0"},
+            {"rank": "2", "bus_id": "3", "bus_name": "bus 3", "verdict": "go", "evaluated_conditional_mw": "5.0"},
+            {"rank": "3", "bus_id": "16", "bus_name": "bus 16", "verdict": "go", "evaluated_conditional_mw": "5.0"},
+            {"rank": "4", "bus_id": "21", "bus_name": "bus 21", "verdict": "go-with-conditions", "evaluated_conditional_mw": "4.8"},
+            {"rank": "5", "bus_id": "22", "bus_name": "bus 22", "verdict": "go-with-conditions", "evaluated_conditional_mw": "4.6"},
+            {"rank": "6", "bus_id": "24", "bus_name": "bus 24", "verdict": "no-go", "evaluated_conditional_mw": "4.0"},
+        ],
+    )
+    _write_csv(
+        stratified,
+        [
+            "bus_id",
+            "bus_name",
+            "qsts_verdict",
+            "requested_mw",
+            "qsts_p90_curtailment_mw",
+            "qsts_expected_curtailment_mwh",
+        ],
+        [
+            _stratified_row(2, "bus 2", "go", 5.0, 0.0, 0.0),
+            _stratified_row(3, "bus 3", "go", 5.0, 0.0, 0.0),
+            _stratified_row(16, "bus 16", "go", 5.0, 0.0, 0.0),
+            _stratified_row(21, "bus 21", "go-with-conditions", 5.0, 0.4, 12.0),
+            _stratified_row(22, "bus 22", "go-with-conditions", 5.0, 0.6, 20.0),
+            _stratified_row(24, "bus 24", "no-go", 5.0, 2.6, 206.0),
+        ],
+    )
+
+    candidates = select_full_year_candidates(
+        FullYearSelectionRequest(screening_csv=screening, stratified_csv=stratified)
+    )
+
+    assert len(candidates) == 5
+    assert [candidate.selection_bucket for candidate in candidates] == [
+        "top_candidate",
+        "top_candidate",
+        "borderline_candidate",
+        "borderline_candidate",
+        "bad_control",
+    ]
+    assert [candidate.bus_id for candidate in candidates] == [2, 3, 21, 22, 24]
+
+
 def test_write_full_year_selection_csv_writes_candidates(tmp_path):
     screening = tmp_path / "screening.csv"
     _write_csv(
