@@ -13,6 +13,7 @@ from typing import Sequence
 
 from thesegrid.assessment import assess_connection
 from thesegrid.bundle import write_bundle_report
+from thesegrid.client_network import validate_client_network, write_client_network_validation
 from thesegrid.constraints import ConstraintSettings
 from thesegrid.full_year_selection import (
     DEFAULT_FULL_YEAR_BAD_CONTROLS,
@@ -27,6 +28,7 @@ from thesegrid.full_year_selection import (
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
 from thesegrid.decision_frontier import decision_frontier_rows
+from thesegrid.pipeline import PipelineRequest, run_pipeline
 from thesegrid.qsts import (
     QstsRequest,
     _decision_confidence,
@@ -78,6 +80,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _select_full_year_candidates(args)
     if args.command == "render-bundle":
         return _render_bundle(args)
+    if args.command == "run-pipeline":
+        return _run_pipeline(args)
+    if args.command == "validate-client-network":
+        return _validate_client_network(args)
     parser.print_help()
     return 2
 
@@ -353,6 +359,106 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Render HTML report, scorecard, and next-campaign guide for an investor bundle",
     )
     bundle.add_argument("--bundle", required=True, type=Path, help="Investor bundle directory")
+    pipeline = subparsers.add_parser(
+        "run-pipeline",
+        help="Run the BESS pre-feasibility pipeline",
+    )
+    pipeline.add_argument("--network", required=True, help="SimBench code, or 'toy' for smoke tests")
+    pipeline.add_argument("--requested-mw", required=True, type=float, help="Requested BESS MW")
+    pipeline.add_argument("--output", required=True, type=Path, help="Output directory")
+    pipeline.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
+    pipeline.add_argument("--top-n", type=int, default=10, help="Rows to show in pipeline report")
+    pipeline.add_argument("--max-buses", type=int, help="Maximum candidate buses to screen")
+    pipeline.add_argument(
+        "--candidate-policy",
+        default="mv_active",
+        choices=["mv_active"],
+        help="Candidate bus selection policy",
+    )
+    pipeline.add_argument(
+        "--data-source-type",
+        default="benchmark",
+        choices=["benchmark", "client_model", "public_reconstruction", "operator_validated"],
+        help="Evidence data-source label used in pipeline outputs",
+    )
+    pipeline.add_argument("--curtailment-tolerance-mwh", type=float, default=0.0)
+    pipeline.add_argument("--p90-curtailment-tolerance-mw", type=float, default=0.0)
+    pipeline.add_argument("--reinforcement-wait-years", type=float, default=5.0)
+    pipeline.add_argument("--gross-margin-eur-per-mwh", type=float, default=0.0)
+    pipeline.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
+    pipeline.add_argument("--waiting-cost-eur-per-mw-year", type=float, default=50_000.0)
+    pipeline.add_argument("--storage-duration-hours", type=float, default=4.0)
+    pipeline.add_argument("--round-trip-efficiency", type=float, default=0.9)
+    pipeline.add_argument("--soc-min-fraction", type=float, default=0.0)
+    pipeline.add_argument("--soc-max-fraction", type=float, default=1.0)
+    pipeline.add_argument(
+        "--run-qsts-stratified",
+        action="store_true",
+        help="Run stratified QSTS for the selected candidate shortlist",
+    )
+    pipeline.add_argument(
+        "--run-qsts-full-year",
+        action="store_true",
+        help="Run full-year QSTS for selected finalists; requires --run-qsts-stratified",
+    )
+    pipeline.add_argument("--qsts-start-hour", type=int, default=0)
+    pipeline.add_argument("--qsts-duration-hours", type=int)
+    pipeline.add_argument("--qsts-sample-every-n-hours", type=int, default=1)
+    pipeline.add_argument("--qsts-progress-every-n-hours", type=int, default=250)
+    pipeline.add_argument("--qsts-voltage-min-pu", type=float, default=0.95)
+    pipeline.add_argument("--qsts-voltage-max-pu", type=float, default=1.05)
+    pipeline.add_argument("--qsts-max-loading-percent", type=float, default=100.0)
+    pipeline.add_argument("--qsts-p90-curtailment-tolerance-mw", type=float, default=0.0)
+    pipeline.add_argument("--qsts-expected-curtailment-tolerance-mwh", type=float, default=0.0)
+    pipeline.add_argument(
+        "--stratified-max-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_MAX_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--stratified-top-go-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_TOP_GO_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--stratified-borderline-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_BORDERLINE_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--stratified-near-threshold-no-go-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_NEAR_THRESHOLD_NO_GO_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--stratified-constraint-diverse-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_CONSTRAINT_DIVERSE_CANDIDATES,
+    )
+    pipeline.add_argument("--full-year-max-candidates", type=int, default=DEFAULT_FULL_YEAR_MAX_CANDIDATES)
+    pipeline.add_argument("--full-year-top-candidates", type=int, default=DEFAULT_FULL_YEAR_TOP_CANDIDATES)
+    pipeline.add_argument(
+        "--full-year-borderline-candidates",
+        type=int,
+        default=DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--full-year-false-positive-suspects",
+        type=int,
+        default=DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS,
+    )
+    pipeline.add_argument("--full-year-bad-controls", type=int, default=DEFAULT_FULL_YEAR_BAD_CONTROLS)
+    validate_client = subparsers.add_parser(
+        "validate-client-network",
+        help="Validate a client_network input package",
+    )
+    validate_client.add_argument(
+        "--client-network",
+        required=True,
+        type=Path,
+        help="Path to client_network directory",
+    )
+    validate_client.add_argument("--output", required=True, type=Path, help="Output directory")
     return parser
 
 
@@ -959,6 +1065,73 @@ def _render_bundle(args: argparse.Namespace) -> int:
         f"{outputs.html_path} {outputs.scorecard_path} {outputs.campaign_guide_path}"
     )
     return 0
+
+
+def _run_pipeline(args: argparse.Namespace) -> int:
+    try:
+        result = run_pipeline(
+            PipelineRequest(
+                network_code=args.network,
+                requested_mw=args.requested_mw,
+                output_dir=args.output,
+                asset=args.asset,
+                top_n=args.top_n,
+                max_buses=args.max_buses,
+                candidate_policy=args.candidate_policy,
+                data_source_type=args.data_source_type,
+                curtailment_tolerance_mwh_per_year=args.curtailment_tolerance_mwh,
+                p90_curtailment_tolerance_mw=args.p90_curtailment_tolerance_mw,
+                reinforcement_wait_years=args.reinforcement_wait_years,
+                economics=EconomicAssumptions(
+                    gross_margin_eur_per_mwh=args.gross_margin_eur_per_mwh,
+                    curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
+                    waiting_cost_eur_per_mw_year=args.waiting_cost_eur_per_mw_year,
+                ),
+                storage_duration_hours=args.storage_duration_hours,
+                round_trip_efficiency=args.round_trip_efficiency,
+                soc_min_fraction=args.soc_min_fraction,
+                soc_max_fraction=args.soc_max_fraction,
+                run_qsts_stratified=args.run_qsts_stratified,
+                run_qsts_full_year=args.run_qsts_full_year,
+                qsts_start_hour=args.qsts_start_hour,
+                qsts_duration_hours=args.qsts_duration_hours,
+                qsts_sample_every_n_hours=args.qsts_sample_every_n_hours,
+                qsts_progress_every_n_hours=args.qsts_progress_every_n_hours,
+                qsts_voltage_min_pu=args.qsts_voltage_min_pu,
+                qsts_voltage_max_pu=args.qsts_voltage_max_pu,
+                qsts_max_loading_percent=args.qsts_max_loading_percent,
+                qsts_p90_curtailment_tolerance_mw=args.qsts_p90_curtailment_tolerance_mw,
+                qsts_expected_curtailment_tolerance_mwh=(
+                    args.qsts_expected_curtailment_tolerance_mwh
+                ),
+                stratified_max_candidates=args.stratified_max_candidates,
+                stratified_top_go_candidates=args.stratified_top_go_candidates,
+                stratified_borderline_candidates=args.stratified_borderline_candidates,
+                stratified_near_threshold_no_go_candidates=(
+                    args.stratified_near_threshold_no_go_candidates
+                ),
+                stratified_constraint_diverse_candidates=(
+                    args.stratified_constraint_diverse_candidates
+                ),
+                full_year_max_candidates=args.full_year_max_candidates,
+                full_year_top_candidates=args.full_year_top_candidates,
+                full_year_borderline_candidates=args.full_year_borderline_candidates,
+                full_year_false_positive_suspects=args.full_year_false_positive_suspects,
+                full_year_bad_controls=args.full_year_bad_controls,
+            )
+        )
+    except (ImportError, ValueError) as exc:
+        print(f"run-pipeline error: {exc}")
+        return 2
+    print(f"pipeline: {result.report_path} {result.manifest_path}")
+    return 0
+
+
+def _validate_client_network(args: argparse.Namespace) -> int:
+    result = validate_client_network(args.client_network)
+    outputs = write_client_network_validation(result, args.output)
+    print(f"client-network validation: {outputs.json_path} {outputs.markdown_path}")
+    return 0 if result.valid else 2
 
 
 def _load_sweep_config(path: Path) -> dict[str, object]:

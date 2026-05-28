@@ -1,7 +1,7 @@
 # Current State and QSTS Next Steps
 
 Status: historical working log. For the current source of truth, use
-`docs/project-status-2026-05-18.md`.
+`docs/product-spec.md` and `docs/demo-pipeline.md`.
 
 Historical result paths referenced before the 2026-05-18 canonical demo cleanup now live
 under `results/archive/legacy_2026-05-18/`.

@@ -35,6 +35,39 @@ def test_render_bundle_html_contains_tables_and_boundaries(tmp_path):
     assert "docs/mvp-decision-policy.md" in html
 
 
+def test_render_bundle_html_uses_pipeline_manifest_context_and_decision_summary(tmp_path):
+    bundle = _write_bundle(tmp_path)
+    (bundle / "pipeline_manifest.json").write_text(
+        json.dumps(
+            {
+                "request": {
+                    "network_code": "client_mv_feeder_a",
+                    "requested_mw": 7.0,
+                    "asset": "bess",
+                },
+                "evidence": {
+                    "data_source_type": "client_model",
+                    "evidence_level": "qsts_full_year",
+                    "decision_confidence": "medium",
+                    "recommended_next_action": "request_operator_study",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    html = render_bundle_html(bundle)
+
+    assert "client_mv_feeder_a" in html
+    assert "7 MW BESS" in html
+    assert "Client Evidence Boundary" in html
+    assert "client_model" in html
+    assert "qsts_full_year" in html
+    assert "Decision Summary" in html
+    assert "final_decision" in html
+    assert "reject_or_resize_connection" in html
+
+
 def test_render_bundle_html_includes_regulatory_assumption_traceability(tmp_path):
     bundle = _write_bundle(tmp_path)
 

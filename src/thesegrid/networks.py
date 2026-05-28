@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import builtins
+from contextlib import contextmanager
 from dataclasses import dataclass
+from types import ModuleType
+from typing import Iterator
 
 import pandas as pd
 
@@ -26,13 +30,44 @@ def load_network(network_code: str) -> object:
         return _toy_network()
 
     try:
-        import simbench as sb
+        with _disable_optional_ortools_import():
+            import simbench as sb
     except ImportError as exc:
         raise ImportError(
             "SimBench is required for non-toy networks. Install the project dependency "
             "with `pip install -e .` before using SimBench codes."
         ) from exc
     return sb.get_simbench_net(network_code)
+
+
+@contextmanager
+def _disable_optional_ortools_import() -> Iterator[None]:
+    """Make pandapower fall back to scipy instead of importing optional OR-Tools.
+
+    Some Python environments abort inside the optional OR-Tools native extension during
+    pandapower import. Thesegrid does not use pandapower's OR-Tools estimation path for
+    screening or QSTS, so raising ImportError for that optional module is safer than
+    letting the process crash before SimBench can load.
+    """
+
+    original_import = builtins.__import__
+
+    def guarded_import(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> ModuleType:
+        if name == "ortools.linear_solver" or name.startswith("ortools.linear_solver."):
+            raise ImportError("optional OR-Tools import disabled for pandapower loading")
+        return original_import(name, globals, locals, fromlist, level)
+
+    builtins.__import__ = guarded_import
+    try:
+        yield
+    finally:
+        builtins.__import__ = original_import
 
 
 def _toy_network() -> ToyNetwork:

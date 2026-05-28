@@ -26,6 +26,10 @@ using the tool for bankable studies.
 - A BESS is tested as injection and withdrawal at the candidate bus.
 - Injection is represented as positive active-power generation.
 - Withdrawal is represented as positive active-power load.
+- The BESS-lite sizing layer records requested MW, storage duration, nominal MWh,
+  round-trip efficiency, and an SoC window for evidence traceability.
+- BESS-lite is not a dispatch, degradation, revenue-stacking, reserve-market, outage, or
+  bankable valuation model.
 - Reactive power is set to zero in the first MVP unless a future study explicitly
   defines a power-factor or reactive-control assumption.
 - The headline firm capacity is the minimum of firm injection and firm withdrawal,

@@ -307,13 +307,21 @@ Conclusion :
 
 ## Lecture du bundle actuel
 
-Le rapport principal est :
+Le bundle actuel se regenere avec :
 
 ```text
-results/investor_bundle_2026-05-19/investor_report.html
+docs/demo-pipeline.md
 ```
 
-Il resume une demonstration sur :
+Le rapport principal devient `investor_report.html` quand la commande full-year du
+pipeline a produit la matrice de validation et le bundle investisseur. Pour un smoke
+rapide, lire plutot :
+
+```text
+results/demo_pipeline_stratified_smoke/pipeline_report.md
+```
+
+La demonstration historique resumait :
 
 - reseau : `1-MV-rural--0-sw` ;
 - actif : batterie BESS ;

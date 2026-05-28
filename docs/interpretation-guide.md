@@ -82,7 +82,11 @@ a PTF, not an official RTE/Enedis offer, and not an official connection study.
 
 ## Reading The Demo Result
 
-In `results/demo_investor_2026-05-18/qsts_representative_stratified_tol3_mwh60/`:
+Current generated results are local artifacts under `results/`. Regenerate them with
+`docs/demo-pipeline.md`.
+
+Historical calibration runs showed this pattern in
+`results/demo_investor_2026-05-18/qsts_representative_stratified_tol3_mwh60/`:
 
 - Bus 2 is a `go`: QSTS P90 MW is 0 and expected curtailed MWh is 0.
 - Bus 21 is a `no-go`: QSTS P90 MW is 2.148 MW, within the 3 MW tolerance, but expected
@@ -93,7 +97,7 @@ In `results/demo_investor_2026-05-18/qsts_representative_stratified_tol3_mwh60/`
 This is the main decision lesson: a site can look acceptable on P90 MW while still being
 unacceptable on annual or sampled curtailed energy.
 
-The full-year calibration run under
+The historical full-year calibration run under
 `results/demo_investor_2026-05-18/qsts_bus2_full_year_tol3_mwh60/` strengthens that
 lesson. Bus 2 changes from stratified `go` to full-year `no-go`: QSTS P90 MW remains
 0, but expected curtailed energy reaches 120.977 MWh across 52 curtailment hours. The

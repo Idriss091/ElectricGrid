@@ -192,3 +192,23 @@ For the first paid pilot, a client can provide either:
 
 The output remains buyer-side pre-feasibility and does not replace the official
 connection study.
+
+## Validation command
+
+Before using a client package in a pipeline, validate the folder structure and declared
+schema:
+
+```bash
+thesegrid validate-client-network \
+  --client-network client_network/ \
+  --output results/client_network_validation
+```
+
+The command writes:
+
+- `client_network_validation.json`
+- `client_network_validation.md`
+
+This validation checks required files, required CSV columns, flat `metadata.yaml`, and
+flat `constraints.yaml`. It does not certify electrical correctness and does not convert
+the package into a pandapower network yet.

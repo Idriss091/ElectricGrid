@@ -33,6 +33,17 @@ class BundleReportPaths:
     resize_markdown_path: Path
 
 
+@dataclass(frozen=True)
+class BundleContext:
+    network_code: str
+    requested_mw: float
+    asset: str
+    data_source_type: str
+    evidence_level: str
+    decision_confidence: str
+    recommended_next_action: str
+
+
 def write_bundle_report(bundle_dir: Path) -> BundleReportPaths:
     bundle_dir.mkdir(parents=True, exist_ok=True)
     html_path = bundle_dir / "investor_report.html"
@@ -162,6 +173,7 @@ def render_bundle_html(bundle_dir: Path) -> str:
     gabarit_rows = _gabarit_assumption_rows(bundle_dir)
     scorecard = render_bundle_scorecard(bundle_dir)
     metrics = _bundle_metrics(validation, resize, qsts, bundle_dir)
+    context = _bundle_context(bundle_dir)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -229,12 +241,12 @@ def render_bundle_html(bundle_dir: Path) -> str:
     <section class="hero">
       <div>
         <h1>Thesegrid BESS Investor Evidence</h1>
-        <p>Flexible-connection pre-feasibility for a 5 MW BESS candidate set on SimBench network <strong>1-MV-rural--0-sw</strong>.</p>
+        <p>Flexible-connection pre-feasibility for a {_format_mw_header(context.requested_mw)} {html.escape(context.asset.upper())} candidate set on network <strong>{html.escape(context.network_code)}</strong>.</p>
         <p class="notice">This is a buyer-side pre-feasibility aid, not an official grid-connection study, PTF, or RTE/Enedis offer.</p>
       </div>
       <aside class="panel">
         <h3>Investment Decision</h3>
-        <p>{_decision_sentence(metrics)}</p>
+        <p>{_decision_sentence(metrics, context.requested_mw)}</p>
         <p>{_badge("no-go", "badge-no-go")} {_badge("resize-recommended", "badge-resize")} {_badge("full-year evidence", "badge-evidence")}</p>
       </aside>
     </section>
@@ -255,10 +267,13 @@ def render_bundle_html(bundle_dir: Path) -> str:
     </section>
 
     <section>
-      <h2>Benchmark Status</h2>
-      <p class="notice">This bundle uses a SimBench benchmark network. It proves the workflow and decision logic, not the feasibility of a real French site.</p>
-      <p>The commercial next step is to run the same workflow on a client, consultant, reconstructed public, or operator-validated network model with explicit data-source labels.</p>
-      <p><strong>MVP Decision Policy:</strong> <code>docs/mvp-decision-policy.md</code>. The default investor-facing policy is <code>standard</code>; thresholds are Thesegrid pre-feasibility assumptions, not official operator thresholds.</p>
+      <h2>Decision Summary</h2>
+      {_html_table(_decision_summary_rows(validation))}
+    </section>
+
+    <section>
+      <h2>{_evidence_boundary_heading(context)}</h2>
+      {_render_evidence_boundary(context)}
     </section>
 
     <section>
@@ -364,6 +379,94 @@ def _readiness(total_buses: int, full_year_buses: int, resize_recommendations: i
     return "screening_only"
 
 
+def _bundle_context(bundle_dir: Path) -> BundleContext:
+    manifest = _read_json(bundle_dir / "pipeline_manifest.json")
+    request = manifest.get("request", {}) if isinstance(manifest.get("request"), dict) else {}
+    evidence = manifest.get("evidence", {}) if isinstance(manifest.get("evidence"), dict) else {}
+    requested_mw = _manifest_float(request.get("requested_mw"), default=5.0)
+    return BundleContext(
+        network_code=str(request.get("network_code") or "1-MV-rural--0-sw"),
+        requested_mw=requested_mw,
+        asset=str(request.get("asset") or "bess"),
+        data_source_type=str(evidence.get("data_source_type") or "benchmark"),
+        evidence_level=str(evidence.get("evidence_level") or "qsts_full_year"),
+        decision_confidence=str(evidence.get("decision_confidence") or ""),
+        recommended_next_action=str(evidence.get("recommended_next_action") or ""),
+    )
+
+
+def _manifest_float(value: object, default: float) -> float:
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        parsed = _float_or_none(value)
+        if parsed is not None:
+            return parsed
+    return default
+
+
+def _decision_summary_rows(validation: list[dict[str, str]]) -> list[dict[str, str]]:
+    return [
+        {
+            "bus_id": row.get("bus_id", ""),
+            "bus_name": row.get("bus_name", ""),
+            "screening_verdict": row.get("screening_verdict", ""),
+            "stratified_verdict": row.get("qsts_stratified_verdict", ""),
+            "full_year_verdict": row.get("qsts_full_year_verdict", ""),
+            "final_decision": _primary_verdict(row),
+            "calibration_status": row.get("calibration_status", ""),
+            "recommended_next_action": row.get("recommended_next_action", ""),
+            "dominant_constraint": row.get("main_recurring_constraint", ""),
+        }
+        for row in validation
+    ]
+
+
+def _evidence_boundary_heading(context: BundleContext) -> str:
+    if context.data_source_type == "benchmark":
+        return "Benchmark Status"
+    return "Client Evidence Boundary"
+
+
+def _render_evidence_boundary(context: BundleContext) -> str:
+    if context.data_source_type == "benchmark":
+        source_notice = (
+            "This bundle uses a SimBench benchmark network. It proves the workflow and "
+            "decision logic, not the feasibility of a real French site."
+        )
+        next_step = (
+            "The commercial next step is to run the same workflow on a client, "
+            "consultant, reconstructed public, or operator-validated network model "
+            "with explicit data-source labels."
+        )
+    else:
+        source_notice = (
+            "This bundle is labelled with a non-benchmark data source. It remains a "
+            "buyer-side pre-feasibility aid unless the assumptions and model are "
+            "operator-validated."
+        )
+        next_step = (
+            "Before commercial reliance, check model provenance, profile period, "
+            "constraints, queue assumptions, and any operator feedback."
+        )
+    rows = [
+        {
+            "data_source_type": context.data_source_type,
+            "evidence_level": context.evidence_level,
+            "decision_confidence": context.decision_confidence,
+            "recommended_next_action": context.recommended_next_action,
+        }
+    ]
+    return (
+        f'<p class="notice">{html.escape(source_notice)}</p>'
+        f"<p>{html.escape(next_step)}</p>"
+        "<p><strong>MVP Decision Policy:</strong> <code>docs/mvp-decision-policy.md</code>. "
+        "The default investor-facing policy is <code>standard</code>; thresholds are "
+        "Thesegrid pre-feasibility assumptions, not official operator thresholds.</p>"
+        + _html_table(rows)
+    )
+
+
 def _bundle_metrics(
     validation: list[dict[str, str]],
     resize: list[dict[str, str]],
@@ -390,10 +493,11 @@ def _bundle_metrics(
     }
 
 
-def _decision_sentence(metrics: dict[str, object]) -> str:
+def _decision_sentence(metrics: dict[str, object], requested_mw: float) -> str:
     return (
         f"{metrics['full_year_coverage']} have full-year evidence. "
-        f"{metrics['full_year_no_go']} buses are no-go under the selected policy at 5 MW, with "
+        f"{metrics['full_year_no_go']} buses are no-go under the selected policy at "
+        f"{_format_mw_header(requested_mw)}, with "
         f"{metrics['resize_recommendations']} actionable resize recommendation."
     )
 

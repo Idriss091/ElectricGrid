@@ -1,8 +1,14 @@
 # Project Status - 2026-05-18
 
-This is the current source of truth for the BESS pre-feasibility MVP. Older audit
-documents and generated result folders remain useful as historical evidence, but this
-file defines the current product state.
+This is a historical status note. The current implementation source of truth is now:
+
+- `docs/product-spec.md` for product scope;
+- `docs/demo-pipeline.md` for the runnable pipeline demo;
+- `docs/data-and-modeling.md` and `docs/assumptions.md` for modelling assumptions.
+
+Older audit documents and generated result folders remain useful as historical
+evidence, but generated `results/` folders are local artifacts and are not required in
+git.
 
 ## Product Direction
 
@@ -17,8 +23,7 @@ The current investor decision output is:
 
 ## Current MVP Workflow
 
-The current defensible workflow is a staged evidence funnel, not "run every study on
-every bus":
+The defensible workflow is a staged evidence funnel, not "run every study on every bus":
 
 1. Run static screening across all eligible candidate MV buses.
 2. Run short QSTS as smoke validation on a small representative set.
@@ -48,33 +53,42 @@ buses))`, and reserve full-year QSTS for 3-5 final or calibration cases.
 
 ## Canonical Commands
 
+Use `run-pipeline` for the current integrated workflow:
+
 ```bash
-thesegrid screen --network 1-MV-rural--0-sw --requested-mw 5 --output <output_dir>
+thesegrid run-pipeline \
+  --network 1-MV-rural--0-sw \
+  --requested-mw 5 \
+  --run-qsts-stratified \
+  --output results/demo_pipeline_stratified_smoke
+```
+
+Use the lower-level commands only for debugging or research campaigns:
+
+```bash
+thesegrid screen --network <network_code> --requested-mw <mw> --output <output_dir>
 thesegrid select-stratified-candidates --screening-csv <screening.csv> --output <stratified_candidates.csv>
-thesegrid qsts --network 1-MV-rural--0-sw --screening-csv <screening.csv> --requested-mw 5 --bus-ids-csv <stratified_candidates.csv> --stratified-sample --output <output_dir>
+thesegrid qsts --network <network_code> --screening-csv <screening.csv> --requested-mw <mw> --bus-ids-csv <stratified_candidates.csv> --stratified-sample --output <output_dir>
 thesegrid select-full-year-candidates --screening-csv <screening.csv> --stratified-csv <qsts_results.csv> --output <full_year_candidates.csv>
-thesegrid qsts-sweep --config <sweep.json> --output <output_dir>
-thesegrid compare-validation --screening-csv <screening.csv> --qsts-short <qsts_results.csv> --qsts-stratified <qsts_results.csv> --qsts-full-year <qsts_results.csv> --output <output_dir>
+thesegrid compare-validation --screening-csv <screening.csv> --qsts-stratified <qsts_results.csv> --qsts-full-year <qsts_results.csv> --output <output_dir>
+thesegrid render-bundle --bundle <bundle_dir>
 ```
 
 ## Current Source Of Truth
 
 Use these documents for current product interpretation:
 
-- `docs/project-status-2026-05-18.md`;
+- `docs/product-spec.md`;
+- `docs/demo-pipeline.md`;
+- `docs/assumptions.md`;
 - `docs/france-bess-connection-context.md`;
 - `docs/decision-policy.md`;
-- `docs/demo-script.md`;
 - `docs/interpretation-guide.md`;
 - `docs/data-and-modeling.md`;
-- `docs/product-spec.md`;
 - `docs/research-protocol.md`.
 
-Use these generated bundles as current reproducible evidence:
-
-- `results/demo_investor_2026-05-18/`;
-- `results/decision_policy_2026-05-18/`;
-- `results/full_year_calibration_2026-05-18/`.
+Generated bundles under `results/` are local, reproducible artifacts. They should be
+regenerated with `docs/demo-pipeline.md` rather than treated as checked-in source.
 
 ## Historical Material
 

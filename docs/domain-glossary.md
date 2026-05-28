@@ -27,3 +27,24 @@ Maximum amount of new generation, storage, or load that can be connected without
 ## QSTS
 
 Quasi-static time-series simulation used to validate network behavior over many time steps.
+
+## Evidence level
+
+Label describing how strong the current decision evidence is: `screening_only`,
+`qsts_short`, `qsts_stratified`, or `qsts_full_year`.
+
+## Validation matrix
+
+Comparison table that aligns screening, short QSTS, stratified QSTS, and full-year QSTS
+verdicts for the same candidate buses.
+
+## BESS-lite
+
+Minimal BESS sizing record used by the MVP pipeline: requested MW, duration, nominal
+MWh, round-trip efficiency, and state-of-charge window. It is not a dispatch,
+degradation, reserve-market, or bankable revenue model.
+
+## Client network package
+
+Structured `client_network/` folder containing metadata, network tables, profiles, and
+constraints for a client, consultant, reconstructed public, or operator-validated model.
