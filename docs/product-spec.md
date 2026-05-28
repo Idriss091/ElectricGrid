@@ -51,6 +51,9 @@ twins are outside the V1 wedge.
 - QSTS resize outputs that test lower MW values and recommend the largest acceptable
   resized connection size, delta MW from the original request, verdict driver, dominant
   constraint, and proxy delta NPV
+- Optional `run-pipeline --run-resize-on-no-go` stage that applies QSTS resize to the
+  first full-year `no-go` finalist and feeds `resize_results.csv` into the investor
+  bundle
 - Performance fields including evaluated bus-hours and power-flow calls per bus-hour
 
 ## V1 limitation

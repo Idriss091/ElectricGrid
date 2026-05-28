@@ -27,19 +27,9 @@ from thesegrid.full_year_selection import (
 )
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
-from thesegrid.decision_frontier import decision_frontier_rows
 from thesegrid.pipeline import PipelineRequest, run_pipeline
-from thesegrid.qsts import (
-    QstsRequest,
-    _decision_confidence,
-    _bus_max_curtailment_event,
-    _qsts_economics_proxy,
-    _qsts_verdict_driver,
-    _recommended_next_action,
-    _validation_level,
-    run_qsts,
-    write_qsts_outputs,
-)
+from thesegrid.qsts import QstsRequest, run_qsts, write_qsts_outputs
+from thesegrid.resize import ResizeRequest, run_resize_scenarios, write_resize_outputs
 from thesegrid.screening import ScreeningRequest, screen_connections, write_screening_outputs
 from thesegrid.stratified_selection import (
     DEFAULT_STRATIFIED_BORDERLINE_CANDIDATES,
@@ -401,6 +391,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run full-year QSTS for selected finalists; requires --run-qsts-stratified",
     )
+    pipeline.add_argument(
+        "--run-resize-on-no-go",
+        action="store_true",
+        help="Run QSTS resize scenarios for the first full-year no-go finalist",
+    )
     pipeline.add_argument("--qsts-start-hour", type=int, default=0)
     pipeline.add_argument("--qsts-duration-hours", type=int)
     pipeline.add_argument("--qsts-sample-every-n-hours", type=int, default=1)
@@ -448,6 +443,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS,
     )
     pipeline.add_argument("--full-year-bad-controls", type=int, default=DEFAULT_FULL_YEAR_BAD_CONTROLS)
+    pipeline.add_argument("--resize-min-mw", type=float, default=1.0)
+    pipeline.add_argument("--resize-step-mw", type=float, default=1.0)
+    pipeline.add_argument(
+        "--resize-selected-policy",
+        default="standard",
+        choices=["strict", "standard", "flexible", "aggressive"],
+    )
+    pipeline.add_argument("--resize-max-buses", type=int, default=1)
     validate_client = subparsers.add_parser(
         "validate-client-network",
         help="Validate a client_network input package",
@@ -856,23 +859,20 @@ def _render_qsts_benchmark_markdown(row: dict[str, object]) -> str:
 
 def _qsts_resize(args: argparse.Namespace) -> int:
     try:
-        mw_values = _resize_mw_values(args.requested_mw, args.min_mw, args.step_mw)
         settings = ConstraintSettings(
             min_vm_pu=args.voltage_min_pu,
             max_vm_pu=args.voltage_max_pu,
             max_loading_percent=args.max_loading_percent,
         )
-        args.output.mkdir(parents=True, exist_ok=True)
-        rows: list[dict[str, object]] = []
-        for index, requested_mw in enumerate(mw_values, start=1):
-            scenario_id = f"mw_{_slug_mw(requested_mw)}"
-            scenario_dir = args.output / scenario_id
-            request = QstsRequest(
+        result = run_resize_scenarios(
+            ResizeRequest(
                 network_code=args.network,
                 screening_csv=args.screening_csv,
-                requested_mw=requested_mw,
-                top_n=1,
-                bus_ids=(args.bus_id,),
+                bus_id=args.bus_id,
+                original_requested_mw=args.requested_mw,
+                min_mw=args.min_mw,
+                step_mw=args.step_mw,
+                output_dir=args.output / "scenarios",
                 asset=args.asset,
                 start_hour=args.start_hour,
                 duration_hours=args.duration_hours,
@@ -888,52 +888,24 @@ def _qsts_resize(args: argparse.Namespace) -> int:
                 curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
                 reinforcement_wait_years=args.reinforcement_wait_years,
                 discount_rate=args.discount_rate,
+                selected_policy=args.selected_policy,
                 pf_numba=args.pf_numba,
                 pf_algorithm=args.pf_algorithm,
                 pf_init=args.pf_init,
                 pf_recycle=args.pf_recycle,
-            )
-            print(
-                f"qsts-resize validating bus {args.bus_id} at {requested_mw:.3f} MW "
-                f"({index}/{len(mw_values)})...",
-                file=sys.stderr,
-            )
-            result = run_qsts(request, settings=settings)
-            write_qsts_outputs(
-                result,
-                scenario_dir,
-                command=(
-                    "qsts-resize",
-                    "--requested-mw",
-                    f"{requested_mw:.6f}",
-                    "--scenario",
-                    scenario_id,
-                ),
-            )
-            rows.append(
-                _resize_result_row(
-                    result,
-                    scenario_dir,
-                    args.requested_mw,
-                    selected_policy=args.selected_policy,
-                )
-            )
+            ),
+            settings=settings,
+            qsts_runner=run_qsts,
+        )
+        outputs = write_resize_outputs(result, args.output)
     except (ImportError, ValueError) as exc:
         print(f"qsts-resize error: {exc}")
         return 2
 
-    results_csv = args.output / "resize_results.csv"
-    _write_resize_results(results_csv, rows)
-    summary_path = args.output / "resize_summary.md"
-    summary_path.write_text(
-        _render_resize_summary(
-            rows=rows,
-            bus_id=args.bus_id,
-            original_requested_mw=args.requested_mw,
-        ),
-        encoding="utf-8",
+    print(
+        f"qsts-resize completed {len(result.rows)} scenarios: "
+        f"{outputs.csv_path} {outputs.summary_path}"
     )
-    print(f"qsts-resize completed {len(rows)} scenarios: {results_csv} {summary_path}")
     return 0
 
 
@@ -1118,6 +1090,11 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                 full_year_borderline_candidates=args.full_year_borderline_candidates,
                 full_year_false_positive_suspects=args.full_year_false_positive_suspects,
                 full_year_bad_controls=args.full_year_bad_controls,
+                run_resize_on_no_go=args.run_resize_on_no_go,
+                resize_min_mw=args.resize_min_mw,
+                resize_step_mw=args.resize_step_mw,
+                resize_selected_policy=args.resize_selected_policy,
+                resize_max_buses=args.resize_max_buses,
             )
         )
     except (ImportError, ValueError) as exc:
@@ -1303,238 +1280,6 @@ def _write_sampling_calibration(path: Path, rows: list[dict[str, object]]) -> No
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-
-
-def _resize_mw_values(requested_mw: float, min_mw: float, step_mw: float) -> list[float]:
-    if requested_mw <= 0:
-        raise ValueError("requested_mw must be positive")
-    if min_mw <= 0:
-        raise ValueError("min_mw must be positive")
-    if min_mw > requested_mw:
-        raise ValueError("min_mw must be less than or equal to requested_mw")
-    if step_mw <= 0:
-        raise ValueError("step_mw must be positive")
-
-    values: list[float] = []
-    current = requested_mw
-    while current >= min_mw - 1e-9:
-        values.append(round(current, 6))
-        current -= step_mw
-    if abs(values[-1] - min_mw) > 1e-9:
-        values.append(round(min_mw, 6))
-    return values
-
-
-def _resize_result_row(
-    result,
-    scenario_dir: Path,
-    original_requested_mw: float,
-    *,
-    selected_policy: str,
-) -> dict[str, object]:
-    if not result.buses:
-        raise ValueError("qsts-resize scenario returned no bus results")
-    bus = result.buses[0]
-    driver = _qsts_verdict_driver(
-        bus.curtailment,
-        p90_tolerance_mw=result.request.p90_curtailment_tolerance_mw,
-        mwh_tolerance=result.request.expected_curtailment_tolerance_mwh,
-    )
-    economics = _qsts_economics_proxy(result)
-    policy_verdicts = _resize_policy_verdicts(
-        result.request,
-        bus,
-        evaluated_time_steps=result.performance.evaluated_time_steps,
-    )
-    selected_policy_verdict = policy_verdicts.get(selected_policy, bus.qsts_verdict)
-    product_decision = _resize_product_decision(
-        selected_policy_verdict,
-        requested_mw=result.request.requested_mw,
-        original_requested_mw=original_requested_mw,
-    )
-    return {
-        "requested_mw": f"{result.request.requested_mw:.6f}",
-        "original_requested_mw": f"{original_requested_mw:.6f}",
-        "delta_mw_from_original": f"{max(original_requested_mw - result.request.requested_mw, 0.0):.6f}",
-        "bus_id": bus.bus_id,
-        "bus_name": bus.bus_name,
-        "qsts_verdict": bus.qsts_verdict,
-        "legacy_qsts_verdict": bus.qsts_verdict,
-        "selected_policy": selected_policy,
-        "strict_policy_verdict": policy_verdicts.get("strict", ""),
-        "standard_policy_verdict": policy_verdicts.get("standard", ""),
-        "flexible_policy_verdict": policy_verdicts.get("flexible", ""),
-        "aggressive_policy_verdict": policy_verdicts.get("aggressive", ""),
-        "product_decision": product_decision,
-        "acceptable": str(_resize_acceptable(selected_policy_verdict)),
-        "validation_level": _validation_level(result.request, result.performance.evaluated_time_steps),
-        "decision_confidence": _decision_confidence(
-            result.request,
-            result.performance.evaluated_time_steps,
-        ),
-        "recommended_next_action": _recommended_next_action(
-            bus.qsts_verdict,
-            driver,
-            result.request,
-            result.performance.evaluated_time_steps,
-        ),
-        "expected_curtailment_mwh": f"{bus.curtailment.expected_mwh:.6f}",
-        "p90_curtailment_mw": f"{bus.curtailment.p90_mw:.6f}",
-        "verdict_driver": driver,
-        "main_recurring_constraint": bus.main_recurring_constraint,
-        "delta_npv_eur": f"{economics.delta_npv_eur:.6f}",
-        "runtime_seconds": f"{result.performance.runtime_seconds:.6f}",
-        "qsts_output_dir": scenario_dir.as_posix(),
-    }
-
-
-def _resize_acceptable(qsts_verdict: str) -> bool:
-    return qsts_verdict in {"go", "go-with-conditions"}
-
-
-def _resize_policy_verdicts(
-    request: QstsRequest,
-    bus: object,
-    evaluated_time_steps: int | None,
-) -> dict[str, str]:
-    max_event_hours, max_event_mwh = _bus_max_curtailment_event(bus)
-    rows = decision_frontier_rows(
-        bus_id=bus.bus_id,
-        bus_name=bus.bus_name,
-        requested_mw=bus.requested_mw,
-        qsts_p90_mw=bus.curtailment.p90_mw,
-        weighted_curtailment_mwh=bus.weighted_curtailment_mwh,
-        curtailment_energy_ratio=bus.curtailment_energy_ratio,
-        max_event_hours=max_event_hours,
-        max_event_mwh=max_event_mwh,
-        validation_level=_validation_level(request, evaluated_time_steps),
-    )
-    return {row.policy: row.frontier_verdict for row in rows}
-
-
-def _resize_product_decision(
-    qsts_verdict: str,
-    requested_mw: float,
-    original_requested_mw: float,
-) -> str:
-    if not _resize_acceptable(qsts_verdict):
-        return "no-go"
-    if requested_mw < original_requested_mw - 1e-9:
-        return "resize-recommended"
-    return qsts_verdict
-
-
-def _write_resize_results(path: Path, rows: list[dict[str, object]]) -> None:
-    fieldnames = [
-        "requested_mw",
-        "original_requested_mw",
-        "delta_mw_from_original",
-        "bus_id",
-        "bus_name",
-        "qsts_verdict",
-        "legacy_qsts_verdict",
-        "selected_policy",
-        "strict_policy_verdict",
-        "standard_policy_verdict",
-        "flexible_policy_verdict",
-        "aggressive_policy_verdict",
-        "product_decision",
-        "acceptable",
-        "validation_level",
-        "decision_confidence",
-        "recommended_next_action",
-        "expected_curtailment_mwh",
-        "p90_curtailment_mw",
-        "verdict_driver",
-        "main_recurring_constraint",
-        "delta_npv_eur",
-        "runtime_seconds",
-        "qsts_output_dir",
-    ]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def _render_resize_summary(
-    rows: list[dict[str, object]],
-    bus_id: int,
-    original_requested_mw: float,
-) -> str:
-    recommended = _recommended_resize_row(rows)
-    if recommended is None:
-        recommendation = (
-            f"Bus {bus_id} is not acceptable at {original_requested_mw:.3f} MW and no "
-            "tested lower MW met the selected decision-frontier policy."
-        )
-        recommended_line = "- recommended_resized_mw: none"
-    else:
-        recommended_mw = float(str(recommended["requested_mw"]))
-        delta_mw = float(str(recommended["delta_mw_from_original"]))
-        selected_policy = str(recommended["selected_policy"])
-        selected_policy_verdict = str(recommended[f"{selected_policy}_policy_verdict"])
-        recommendation = (
-            f"Bus {bus_id} is not acceptable at {original_requested_mw:.3f} MW, but is "
-            f"acceptable at {recommended_mw:.3f} MW under selected policy "
-            f"`{selected_policy}` with policy verdict `{selected_policy_verdict}`."
-        )
-        recommended_line = (
-            f"- product_decision: {recommended['product_decision']}\n"
-            f"- selected_policy: {selected_policy}\n"
-            f"- selected_policy_verdict: {selected_policy_verdict}\n"
-            f"- recommended_resized_mw: {recommended_mw:.3f}\n"
-            f"- delta_mw_from_original: {delta_mw:.3f}\n"
-            f"- delta_npv_eur: {float(str(recommended['delta_npv_eur'])):.2f}"
-        )
-    return f"""# QSTS Resize Summary
-
-This resize workflow is a buyer-side pre-feasibility aid. It does not replace an
-official connection study or PTF.
-
-## Recommendation
-
-{recommended_line}
-- original_requested_mw: {original_requested_mw:.3f}
-- bus_id: {bus_id}
-
-{recommendation}
-
-## Tested MW
-
-{_render_resize_table(rows)}
-"""
-
-
-def _recommended_resize_row(rows: list[dict[str, object]]) -> dict[str, object] | None:
-    acceptable = [row for row in rows if row["acceptable"] == "True"]
-    if not acceptable:
-        return None
-    return max(acceptable, key=lambda row: float(str(row["requested_mw"])))
-
-
-def _render_resize_table(rows: list[dict[str, object]]) -> str:
-    if not rows:
-        return "No resize scenarios were evaluated."
-    lines = [
-        "| requested_mw | product_decision | verdict | acceptable | expected_mwh | p90_mw | delta_npv_eur | driver | output |",
-        "| ---: | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
-    ]
-    for row in rows:
-        lines.append(
-            "| "
-            f"{float(str(row['requested_mw'])):.3f} | {row['product_decision']} | "
-            f"{row['qsts_verdict']} | "
-            f"{row['acceptable']} | {float(str(row['expected_curtailment_mwh'])):.3f} | "
-            f"{float(str(row['p90_curtailment_mw'])):.3f} | "
-            f"{float(str(row['delta_npv_eur'])):.2f} | {row['verdict_driver']} | "
-            f"{row['qsts_output_dir']} |"
-        )
-    return "\n".join(lines)
-
-
-def _slug_mw(value: float) -> str:
-    return f"{value:.3f}".rstrip("0").rstrip(".").replace(".", "p")
 
 
 def _parse_bus_ids(value: str | None) -> tuple[int, ...]:

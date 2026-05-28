@@ -23,6 +23,7 @@ from thesegrid.full_year_selection import (
 )
 from thesegrid.models import EconomicAssumptions
 from thesegrid.qsts import QstsRequest, run_qsts, write_qsts_outputs
+from thesegrid.resize import ResizeRequest, run_resize_scenarios, write_resize_outputs
 from thesegrid.screening import ScreeningRequest, screen_connections, write_screening_outputs
 from thesegrid.stratified_selection import (
     DEFAULT_STRATIFIED_BORDERLINE_CANDIDATES,
@@ -81,6 +82,11 @@ class PipelineRequest:
     full_year_borderline_candidates: int = DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES
     full_year_false_positive_suspects: int = DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS
     full_year_bad_controls: int = DEFAULT_FULL_YEAR_BAD_CONTROLS
+    run_resize_on_no_go: bool = False
+    resize_min_mw: float = 1.0
+    resize_step_mw: float = 1.0
+    resize_selected_policy: str = "standard"
+    resize_max_buses: int = 1
 
     def __post_init__(self) -> None:
         if not self.network_code:
@@ -91,6 +97,10 @@ class PipelineRequest:
             raise ValueError("top_n must be positive")
         if self.run_qsts_full_year and not self.run_qsts_stratified:
             raise ValueError("run_qsts_full_year requires run_qsts_stratified")
+        if self.run_resize_on_no_go and not self.run_qsts_full_year:
+            raise ValueError("run_resize_on_no_go requires run_qsts_full_year")
+        if self.resize_max_buses <= 0:
+            raise ValueError("resize_max_buses must be positive")
         evidence_profile(evidence_level="screening_only", data_source_type=self.data_source_type)
         self.bess_lite()
 
@@ -123,6 +133,8 @@ class PipelineResult:
     qsts_full_year_memo_path: Path | None = None
     validation_matrix_csv_path: Path | None = None
     validation_matrix_markdown_path: Path | None = None
+    resize_results_csv_path: Path | None = None
+    resize_summary_path: Path | None = None
     investor_report_html_path: Path | None = None
     scorecard_path: Path | None = None
     campaign_guide_path: Path | None = None
@@ -168,6 +180,7 @@ def run_pipeline(request: PipelineRequest) -> PipelineResult:
     qsts_outputs = None
     qsts_full_year_outputs = None
     validation_outputs = None
+    resize_outputs = None
     bundle_outputs = None
     full_year_candidates: tuple[FullYearCandidate, ...] = ()
     full_year_selection_csv = None
@@ -230,6 +243,55 @@ def run_pipeline(request: PipelineRequest) -> PipelineResult:
                 validation_matrix,
                 request.output_dir / "validation",
             )
+            if request.run_resize_on_no_go:
+                no_go_buses = tuple(
+                    bus for bus in qsts_full_year_result.buses if bus.qsts_verdict == "no-go"
+                )
+                if no_go_buses:
+                    resize_bus = no_go_buses[0]
+                    resize_result = run_resize_scenarios(
+                        ResizeRequest(
+                            network_code=request.network_code,
+                            screening_csv=screening_outputs.csv_path,
+                            bus_id=resize_bus.bus_id,
+                            original_requested_mw=request.requested_mw,
+                            min_mw=request.resize_min_mw,
+                            step_mw=request.resize_step_mw,
+                            output_dir=request.output_dir
+                            / "resize"
+                            / "scenarios"
+                            / f"bus_{resize_bus.bus_id}",
+                            asset=request.asset,
+                            start_hour=0,
+                            duration_hours=None,
+                            sample_every_n_hours=1,
+                            stratified_sample=False,
+                            progress_every_n_hours=request.qsts_progress_every_n_hours,
+                            p90_curtailment_tolerance_mw=(
+                                request.qsts_p90_curtailment_tolerance_mw
+                            ),
+                            expected_curtailment_tolerance_mwh=(
+                                request.qsts_expected_curtailment_tolerance_mwh
+                            ),
+                            storage_duration_hours=request.storage_duration_hours,
+                            curtailment_penalty_eur_per_mwh=(
+                                request.economics.curtailment_penalty_eur_per_mwh
+                            ),
+                            reinforcement_wait_years=request.reinforcement_wait_years,
+                            selected_policy=request.resize_selected_policy,
+                        ),
+                        settings=ConstraintSettings(
+                            min_vm_pu=request.qsts_voltage_min_pu,
+                            max_vm_pu=request.qsts_voltage_max_pu,
+                            max_loading_percent=request.qsts_max_loading_percent,
+                        ),
+                    )
+                    resize_outputs = write_resize_outputs(
+                        resize_result,
+                        request.output_dir / "resize",
+                    )
+                    _copy_if_available(resize_outputs.csv_path, request.output_dir / "resize_results.csv")
+                    _copy_if_available(resize_outputs.summary_path, request.output_dir / "resize_summary.md")
             _prepare_bundle_inputs(
                 output_dir=request.output_dir,
                 validation_outputs=validation_outputs,
@@ -275,6 +337,8 @@ def run_pipeline(request: PipelineRequest) -> PipelineResult:
         validation_matrix_markdown_path=(
             None if validation_outputs is None else validation_outputs.markdown_path
         ),
+        resize_results_csv_path=None if resize_outputs is None else resize_outputs.csv_path,
+        resize_summary_path=None if resize_outputs is None else resize_outputs.summary_path,
         investor_report_html_path=None if bundle_outputs is None else bundle_outputs.html_path,
         scorecard_path=None if bundle_outputs is None else bundle_outputs.scorecard_path,
         campaign_guide_path=None if bundle_outputs is None else bundle_outputs.campaign_guide_path,
@@ -371,6 +435,7 @@ This is not a dispatch, degradation, revenue-stacking, or bankable valuation mod
 | full_year_candidate_selection | {_full_year_selection_status(request)} | {_full_year_selection_output(request)} |
 | qsts_full_year | {_qsts_full_year_stage_status(request)} | {_qsts_full_year_stage_output(request)} |
 | validation_matrix | {_validation_matrix_stage_status(request)} | {_validation_matrix_stage_output(request)} |
+| resize | {_resize_stage_status(request)} | {_resize_stage_output(request)} |
 | investor_bundle | {_investor_bundle_stage_status(request)} | {_investor_bundle_stage_output(request)} |
 
 {_qsts_stage_note(request)}
@@ -411,6 +476,7 @@ This is not a dispatch, degradation, revenue-stacking, or bankable valuation mod
 {_qsts_artifact_rows(request)}
 {_full_year_selection_artifact_rows(request)}
 {_validation_matrix_artifact_rows(request)}
+{_resize_artifact_rows(request)}
 {_investor_bundle_artifact_rows(request)}
 
 ## Recommended Next Actions
@@ -555,6 +621,14 @@ def _investor_bundle_stage_output(request: PipelineRequest) -> str:
     return "investor_report.html" if request.run_qsts_full_year else ""
 
 
+def _resize_stage_status(request: PipelineRequest) -> str:
+    return "completed" if request.run_resize_on_no_go else "not_run"
+
+
+def _resize_stage_output(request: PipelineRequest) -> str:
+    return "resize/resize_results.csv" if request.run_resize_on_no_go else ""
+
+
 def _qsts_stage_note(request: PipelineRequest) -> str:
     if request.run_qsts_stratified:
         return (
@@ -618,6 +692,17 @@ def _investor_bundle_artifact_rows(request: PipelineRequest) -> str:
     )
 
 
+def _resize_artifact_rows(request: PipelineRequest) -> str:
+    if not request.run_resize_on_no_go:
+        return ""
+    return "\n".join(
+        (
+            "| resize/resize_results.csv | QSTS resize scenarios for first no-go finalist |",
+            "| resize/resize_summary.md | Human-readable resize recommendation |",
+        )
+    )
+
+
 def _pipeline_manifest(
     request: PipelineRequest,
     result: PipelineResult,
@@ -651,6 +736,7 @@ def _pipeline_manifest(
             "full_year_selection": _full_year_selection_manifest_stage(result),
             "qsts_full_year": _qsts_full_year_manifest_stage(result),
             "validation_matrix": _validation_matrix_manifest_stage(result),
+            "resize": _resize_manifest_stage(result),
             "investor_bundle": _investor_bundle_manifest_stage(result),
         },
         "outputs": {
@@ -729,6 +815,18 @@ def _investor_bundle_manifest_stage(result: PipelineResult) -> dict[str, object]
             "investor_report": _relative(result.investor_report_html_path, result.output_dir),
             "scorecard": _relative(result.scorecard_path, result.output_dir),
             "next_calibration_campaign": _relative(result.campaign_guide_path, result.output_dir),
+        },
+    }
+
+
+def _resize_manifest_stage(result: PipelineResult) -> dict[str, object]:
+    if result.resize_results_csv_path is None:
+        return {"status": "not_run", "outputs": {}}
+    return {
+        "status": "completed",
+        "outputs": {
+            "resize_results": _relative(result.resize_results_csv_path, result.output_dir),
+            "resize_summary": _relative(result.resize_summary_path, result.output_dir),
         },
     }
 

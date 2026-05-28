@@ -53,6 +53,10 @@ thesegrid run-pipeline \
   --qsts-expected-curtailment-tolerance-mwh 60 \
   --run-qsts-stratified \
   --run-qsts-full-year \
+  --run-resize-on-no-go \
+  --resize-min-mw 2 \
+  --resize-step-mw 1 \
+  --resize-selected-policy standard \
   --output results/demo_pipeline_full_year
 ```
 
@@ -73,7 +77,9 @@ The demo is valid when these files exist:
 - `full_year_candidate_selection.csv`
 - `qsts_full_year/qsts_results.csv`
 - `validation/validation_matrix.csv`
+- `resize/resize_results.csv` when a full-year no-go finalist is resized
 - `validation_matrix.csv`
+- `resize_results.csv` when resize ran
 - `investor_report.html`
 - `scorecard.md`
 - `next_calibration_campaign.md`
@@ -85,7 +91,9 @@ The demo is valid when these files exist:
 3. Open `investor_report.html` for the client-facing bundle.
 4. Inspect `validation/validation_matrix.csv` when a verdict changes between screening,
    stratified QSTS, and full-year QSTS.
-5. Inspect `pipeline_manifest.json` before sharing results, because it records the
+5. Inspect `resize/resize_results.csv` when the full-year finalist is `no-go` and the
+   pipeline was run with `--run-resize-on-no-go`.
+6. Inspect `pipeline_manifest.json` before sharing results, because it records the
    network, requested MW, BESS-lite assumptions, and evidence level.
 
 ## Acceptance Criteria
