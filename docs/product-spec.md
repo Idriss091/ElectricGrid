@@ -36,6 +36,10 @@ twins are outside the V1 wedge.
 - Resize-recommended decision when the requested MW is rejected but a lower tested MW is
   QSTS-acceptable
 - Automated investment memo
+- Pipeline command that runs static screening, stratified candidate selection, and
+  optionally stratified QSTS behind an explicit flag, then selects full-year QSTS
+  finalists and optionally runs full-year QSTS behind a second explicit flag
+- Reproducible full-pipeline demo runbook in `docs/demo-pipeline.md`
 - QSTS bundle with `investment_memo.md`, `run_manifest.json`, `qsts_performance.json`,
   `static_vs_qsts_comparison.csv`, and contractual-envelope CSVs
 - Validation matrix comparing screening, QSTS short, QSTS stratified, and QSTS full-year
@@ -47,6 +51,9 @@ twins are outside the V1 wedge.
 - QSTS resize outputs that test lower MW values and recommend the largest acceptable
   resized connection size, delta MW from the original request, verdict driver, dominant
   constraint, and proxy delta NPV
+- Optional `run-pipeline --run-resize-on-no-go` stage that applies QSTS resize to the
+  first full-year `no-go` finalist and feeds `resize_results.csv` into the investor
+  bundle
 - Performance fields including evaluated bus-hours and power-flow calls per bus-hour
 
 ## V1 limitation

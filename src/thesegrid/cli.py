@@ -13,27 +13,34 @@ from typing import Sequence
 
 from thesegrid.assessment import assess_connection
 from thesegrid.bundle import write_bundle_report
+from thesegrid.client_network import validate_client_network, write_client_network_validation
 from thesegrid.constraints import ConstraintSettings
 from thesegrid.full_year_selection import (
+    DEFAULT_FULL_YEAR_BAD_CONTROLS,
+    DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES,
+    DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS,
+    DEFAULT_FULL_YEAR_MAX_CANDIDATES,
+    DEFAULT_FULL_YEAR_TOP_CANDIDATES,
     FullYearSelectionRequest,
     select_full_year_candidates,
     write_full_year_selection_csv,
 )
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
-from thesegrid.decision_frontier import decision_frontier_rows
-from thesegrid.qsts import (
-    QstsRequest,
-    _decision_confidence,
-    _bus_max_curtailment_event,
-    _qsts_economics_proxy,
-    _qsts_verdict_driver,
-    _recommended_next_action,
-    _validation_level,
-    run_qsts,
-    write_qsts_outputs,
-)
+from thesegrid.pipeline import PipelineRequest, run_pipeline
+from thesegrid.qsts import QstsRequest, run_qsts, write_qsts_outputs
+from thesegrid.resize import ResizeRequest, run_resize_scenarios, write_resize_outputs
 from thesegrid.screening import ScreeningRequest, screen_connections, write_screening_outputs
+from thesegrid.stratified_selection import (
+    DEFAULT_STRATIFIED_BORDERLINE_CANDIDATES,
+    DEFAULT_STRATIFIED_CONSTRAINT_DIVERSE_CANDIDATES,
+    DEFAULT_STRATIFIED_MAX_CANDIDATES,
+    DEFAULT_STRATIFIED_NEAR_THRESHOLD_NO_GO_CANDIDATES,
+    DEFAULT_STRATIFIED_TOP_GO_CANDIDATES,
+    StratifiedSelectionRequest,
+    select_stratified_candidates,
+    write_stratified_selection_csv,
+)
 from thesegrid.validation_matrix import build_validation_matrix, write_validation_matrix_outputs
 
 
@@ -57,10 +64,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _qsts_sweep(args)
     if args.command == "compare-validation":
         return _compare_validation(args)
+    if args.command == "select-stratified-candidates":
+        return _select_stratified_candidates(args)
     if args.command == "select-full-year-candidates":
         return _select_full_year_candidates(args)
     if args.command == "render-bundle":
         return _render_bundle(args)
+    if args.command == "run-pipeline":
+        return _run_pipeline(args)
+    if args.command == "validate-client-network":
+        return _validate_client_network(args)
     parser.print_help()
     return 2
 
@@ -133,6 +146,11 @@ def _build_parser() -> argparse.ArgumentParser:
     qsts.add_argument(
         "--bus-ids",
         help="Comma-separated screening bus IDs to validate; overrides --top-n selection",
+    )
+    qsts.add_argument(
+        "--bus-ids-csv",
+        type=Path,
+        help="CSV with a bus_id column to validate; ignored when --bus-ids is provided",
     )
     qsts.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
     qsts.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
@@ -282,6 +300,29 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Policy used as final_decision when decision frontier rows are available",
     )
     compare.add_argument("--output", required=True, type=Path, help="Output directory")
+    select_stratified = subparsers.add_parser(
+        "select-stratified-candidates",
+        help="Select a balanced set of buses for stratified QSTS",
+    )
+    select_stratified.add_argument("--screening-csv", required=True, type=Path)
+    select_stratified.add_argument("--output", required=True, type=Path)
+    select_stratified.add_argument("--max-candidates", type=int, default=DEFAULT_STRATIFIED_MAX_CANDIDATES)
+    select_stratified.add_argument("--top-go-candidates", type=int, default=DEFAULT_STRATIFIED_TOP_GO_CANDIDATES)
+    select_stratified.add_argument(
+        "--borderline-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_BORDERLINE_CANDIDATES,
+    )
+    select_stratified.add_argument(
+        "--near-threshold-no-go-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_NEAR_THRESHOLD_NO_GO_CANDIDATES,
+    )
+    select_stratified.add_argument(
+        "--constraint-diverse-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_CONSTRAINT_DIVERSE_CANDIDATES,
+    )
     select_full_year = subparsers.add_parser(
         "select-full-year-candidates",
         help="Select a balanced set of QSTS full-year candidates",
@@ -290,16 +331,137 @@ def _build_parser() -> argparse.ArgumentParser:
     select_full_year.add_argument("--stratified-csv", type=Path)
     select_full_year.add_argument("--validation-matrix-csv", type=Path)
     select_full_year.add_argument("--output", required=True, type=Path)
-    select_full_year.add_argument("--max-candidates", type=int, default=8)
-    select_full_year.add_argument("--top-candidates", type=int, default=3)
-    select_full_year.add_argument("--borderline-candidates", type=int, default=3)
-    select_full_year.add_argument("--false-positive-suspects", type=int, default=1)
-    select_full_year.add_argument("--bad-controls", type=int, default=1)
+    select_full_year.add_argument("--max-candidates", type=int, default=DEFAULT_FULL_YEAR_MAX_CANDIDATES)
+    select_full_year.add_argument("--top-candidates", type=int, default=DEFAULT_FULL_YEAR_TOP_CANDIDATES)
+    select_full_year.add_argument(
+        "--borderline-candidates",
+        type=int,
+        default=DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES,
+    )
+    select_full_year.add_argument(
+        "--false-positive-suspects",
+        type=int,
+        default=DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS,
+    )
+    select_full_year.add_argument("--bad-controls", type=int, default=DEFAULT_FULL_YEAR_BAD_CONTROLS)
     bundle = subparsers.add_parser(
         "render-bundle",
         help="Render HTML report, scorecard, and next-campaign guide for an investor bundle",
     )
     bundle.add_argument("--bundle", required=True, type=Path, help="Investor bundle directory")
+    pipeline = subparsers.add_parser(
+        "run-pipeline",
+        help="Run the BESS pre-feasibility pipeline",
+    )
+    pipeline.add_argument("--network", required=True, help="SimBench code, or 'toy' for smoke tests")
+    pipeline.add_argument("--requested-mw", required=True, type=float, help="Requested BESS MW")
+    pipeline.add_argument("--output", required=True, type=Path, help="Output directory")
+    pipeline.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
+    pipeline.add_argument("--top-n", type=int, default=10, help="Rows to show in pipeline report")
+    pipeline.add_argument("--max-buses", type=int, help="Maximum candidate buses to screen")
+    pipeline.add_argument(
+        "--candidate-policy",
+        default="mv_active",
+        choices=["mv_active"],
+        help="Candidate bus selection policy",
+    )
+    pipeline.add_argument(
+        "--data-source-type",
+        default="benchmark",
+        choices=["benchmark", "client_model", "public_reconstruction", "operator_validated"],
+        help="Evidence data-source label used in pipeline outputs",
+    )
+    pipeline.add_argument("--curtailment-tolerance-mwh", type=float, default=0.0)
+    pipeline.add_argument("--p90-curtailment-tolerance-mw", type=float, default=0.0)
+    pipeline.add_argument("--reinforcement-wait-years", type=float, default=5.0)
+    pipeline.add_argument("--gross-margin-eur-per-mwh", type=float, default=0.0)
+    pipeline.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
+    pipeline.add_argument("--waiting-cost-eur-per-mw-year", type=float, default=50_000.0)
+    pipeline.add_argument("--storage-duration-hours", type=float, default=4.0)
+    pipeline.add_argument("--round-trip-efficiency", type=float, default=0.9)
+    pipeline.add_argument("--soc-min-fraction", type=float, default=0.0)
+    pipeline.add_argument("--soc-max-fraction", type=float, default=1.0)
+    pipeline.add_argument(
+        "--run-qsts-stratified",
+        action="store_true",
+        help="Run stratified QSTS for the selected candidate shortlist",
+    )
+    pipeline.add_argument(
+        "--run-qsts-full-year",
+        action="store_true",
+        help="Run full-year QSTS for selected finalists; requires --run-qsts-stratified",
+    )
+    pipeline.add_argument(
+        "--run-resize-on-no-go",
+        action="store_true",
+        help="Run QSTS resize scenarios for the first full-year no-go finalist",
+    )
+    pipeline.add_argument("--qsts-start-hour", type=int, default=0)
+    pipeline.add_argument("--qsts-duration-hours", type=int)
+    pipeline.add_argument("--qsts-sample-every-n-hours", type=int, default=1)
+    pipeline.add_argument("--qsts-progress-every-n-hours", type=int, default=250)
+    pipeline.add_argument("--qsts-voltage-min-pu", type=float, default=0.95)
+    pipeline.add_argument("--qsts-voltage-max-pu", type=float, default=1.05)
+    pipeline.add_argument("--qsts-max-loading-percent", type=float, default=100.0)
+    pipeline.add_argument("--qsts-p90-curtailment-tolerance-mw", type=float, default=0.0)
+    pipeline.add_argument("--qsts-expected-curtailment-tolerance-mwh", type=float, default=0.0)
+    pipeline.add_argument(
+        "--stratified-max-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_MAX_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--stratified-top-go-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_TOP_GO_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--stratified-borderline-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_BORDERLINE_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--stratified-near-threshold-no-go-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_NEAR_THRESHOLD_NO_GO_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--stratified-constraint-diverse-candidates",
+        type=int,
+        default=DEFAULT_STRATIFIED_CONSTRAINT_DIVERSE_CANDIDATES,
+    )
+    pipeline.add_argument("--full-year-max-candidates", type=int, default=DEFAULT_FULL_YEAR_MAX_CANDIDATES)
+    pipeline.add_argument("--full-year-top-candidates", type=int, default=DEFAULT_FULL_YEAR_TOP_CANDIDATES)
+    pipeline.add_argument(
+        "--full-year-borderline-candidates",
+        type=int,
+        default=DEFAULT_FULL_YEAR_BORDERLINE_CANDIDATES,
+    )
+    pipeline.add_argument(
+        "--full-year-false-positive-suspects",
+        type=int,
+        default=DEFAULT_FULL_YEAR_FALSE_POSITIVE_SUSPECTS,
+    )
+    pipeline.add_argument("--full-year-bad-controls", type=int, default=DEFAULT_FULL_YEAR_BAD_CONTROLS)
+    pipeline.add_argument("--resize-min-mw", type=float, default=1.0)
+    pipeline.add_argument("--resize-step-mw", type=float, default=1.0)
+    pipeline.add_argument(
+        "--resize-selected-policy",
+        default="standard",
+        choices=["strict", "standard", "flexible", "aggressive"],
+    )
+    pipeline.add_argument("--resize-max-buses", type=int, default=1)
+    validate_client = subparsers.add_parser(
+        "validate-client-network",
+        help="Validate a client_network input package",
+    )
+    validate_client.add_argument(
+        "--client-network",
+        required=True,
+        type=Path,
+        help="Path to client_network directory",
+    )
+    validate_client.add_argument("--output", required=True, type=Path, help="Output directory")
     return parser
 
 
@@ -312,6 +474,11 @@ def _add_qsts_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--bus-ids",
         help="Comma-separated screening bus IDs to validate; overrides --top-n selection",
+    )
+    parser.add_argument(
+        "--bus-ids-csv",
+        type=Path,
+        help="CSV with a bus_id column to validate; ignored when --bus-ids is provided",
     )
     parser.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
     parser.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
@@ -495,7 +662,7 @@ def _qsts_request_from_args(
         screening_csv=args.screening_csv,
         requested_mw=args.requested_mw if requested_mw is None else requested_mw,
         top_n=args.top_n,
-        bus_ids=_parse_bus_ids(args.bus_ids) if bus_ids is None else bus_ids,
+        bus_ids=_qsts_bus_ids_from_args(args) if bus_ids is None else bus_ids,
         asset=args.asset,
         start_hour=args.start_hour,
         duration_hours=args.duration_hours,
@@ -692,23 +859,20 @@ def _render_qsts_benchmark_markdown(row: dict[str, object]) -> str:
 
 def _qsts_resize(args: argparse.Namespace) -> int:
     try:
-        mw_values = _resize_mw_values(args.requested_mw, args.min_mw, args.step_mw)
         settings = ConstraintSettings(
             min_vm_pu=args.voltage_min_pu,
             max_vm_pu=args.voltage_max_pu,
             max_loading_percent=args.max_loading_percent,
         )
-        args.output.mkdir(parents=True, exist_ok=True)
-        rows: list[dict[str, object]] = []
-        for index, requested_mw in enumerate(mw_values, start=1):
-            scenario_id = f"mw_{_slug_mw(requested_mw)}"
-            scenario_dir = args.output / scenario_id
-            request = QstsRequest(
+        result = run_resize_scenarios(
+            ResizeRequest(
                 network_code=args.network,
                 screening_csv=args.screening_csv,
-                requested_mw=requested_mw,
-                top_n=1,
-                bus_ids=(args.bus_id,),
+                bus_id=args.bus_id,
+                original_requested_mw=args.requested_mw,
+                min_mw=args.min_mw,
+                step_mw=args.step_mw,
+                output_dir=args.output / "scenarios",
                 asset=args.asset,
                 start_hour=args.start_hour,
                 duration_hours=args.duration_hours,
@@ -724,52 +888,24 @@ def _qsts_resize(args: argparse.Namespace) -> int:
                 curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
                 reinforcement_wait_years=args.reinforcement_wait_years,
                 discount_rate=args.discount_rate,
+                selected_policy=args.selected_policy,
                 pf_numba=args.pf_numba,
                 pf_algorithm=args.pf_algorithm,
                 pf_init=args.pf_init,
                 pf_recycle=args.pf_recycle,
-            )
-            print(
-                f"qsts-resize validating bus {args.bus_id} at {requested_mw:.3f} MW "
-                f"({index}/{len(mw_values)})...",
-                file=sys.stderr,
-            )
-            result = run_qsts(request, settings=settings)
-            write_qsts_outputs(
-                result,
-                scenario_dir,
-                command=(
-                    "qsts-resize",
-                    "--requested-mw",
-                    f"{requested_mw:.6f}",
-                    "--scenario",
-                    scenario_id,
-                ),
-            )
-            rows.append(
-                _resize_result_row(
-                    result,
-                    scenario_dir,
-                    args.requested_mw,
-                    selected_policy=args.selected_policy,
-                )
-            )
+            ),
+            settings=settings,
+            qsts_runner=run_qsts,
+        )
+        outputs = write_resize_outputs(result, args.output)
     except (ImportError, ValueError) as exc:
         print(f"qsts-resize error: {exc}")
         return 2
 
-    results_csv = args.output / "resize_results.csv"
-    _write_resize_results(results_csv, rows)
-    summary_path = args.output / "resize_summary.md"
-    summary_path.write_text(
-        _render_resize_summary(
-            rows=rows,
-            bus_id=args.bus_id,
-            original_requested_mw=args.requested_mw,
-        ),
-        encoding="utf-8",
+    print(
+        f"qsts-resize completed {len(result.rows)} scenarios: "
+        f"{outputs.csv_path} {outputs.summary_path}"
     )
-    print(f"qsts-resize completed {len(rows)} scenarios: {results_csv} {summary_path}")
     return 0
 
 
@@ -860,6 +996,22 @@ def _compare_validation(args: argparse.Namespace) -> int:
     return 0
 
 
+def _select_stratified_candidates(args: argparse.Namespace) -> int:
+    candidates = select_stratified_candidates(
+        StratifiedSelectionRequest(
+            screening_csv=args.screening_csv,
+            max_candidates=args.max_candidates,
+            top_go_candidates=args.top_go_candidates,
+            borderline_candidates=args.borderline_candidates,
+            near_threshold_no_go_candidates=args.near_threshold_no_go_candidates,
+            constraint_diverse_candidates=args.constraint_diverse_candidates,
+        )
+    )
+    output = write_stratified_selection_csv(candidates, args.output)
+    print(f"stratified candidate selection: {output}")
+    return 0
+
+
 def _select_full_year_candidates(args: argparse.Namespace) -> int:
     candidates = select_full_year_candidates(
         FullYearSelectionRequest(
@@ -885,6 +1037,78 @@ def _render_bundle(args: argparse.Namespace) -> int:
         f"{outputs.html_path} {outputs.scorecard_path} {outputs.campaign_guide_path}"
     )
     return 0
+
+
+def _run_pipeline(args: argparse.Namespace) -> int:
+    try:
+        result = run_pipeline(
+            PipelineRequest(
+                network_code=args.network,
+                requested_mw=args.requested_mw,
+                output_dir=args.output,
+                asset=args.asset,
+                top_n=args.top_n,
+                max_buses=args.max_buses,
+                candidate_policy=args.candidate_policy,
+                data_source_type=args.data_source_type,
+                curtailment_tolerance_mwh_per_year=args.curtailment_tolerance_mwh,
+                p90_curtailment_tolerance_mw=args.p90_curtailment_tolerance_mw,
+                reinforcement_wait_years=args.reinforcement_wait_years,
+                economics=EconomicAssumptions(
+                    gross_margin_eur_per_mwh=args.gross_margin_eur_per_mwh,
+                    curtailment_penalty_eur_per_mwh=args.curtailment_penalty_eur_per_mwh,
+                    waiting_cost_eur_per_mw_year=args.waiting_cost_eur_per_mw_year,
+                ),
+                storage_duration_hours=args.storage_duration_hours,
+                round_trip_efficiency=args.round_trip_efficiency,
+                soc_min_fraction=args.soc_min_fraction,
+                soc_max_fraction=args.soc_max_fraction,
+                run_qsts_stratified=args.run_qsts_stratified,
+                run_qsts_full_year=args.run_qsts_full_year,
+                qsts_start_hour=args.qsts_start_hour,
+                qsts_duration_hours=args.qsts_duration_hours,
+                qsts_sample_every_n_hours=args.qsts_sample_every_n_hours,
+                qsts_progress_every_n_hours=args.qsts_progress_every_n_hours,
+                qsts_voltage_min_pu=args.qsts_voltage_min_pu,
+                qsts_voltage_max_pu=args.qsts_voltage_max_pu,
+                qsts_max_loading_percent=args.qsts_max_loading_percent,
+                qsts_p90_curtailment_tolerance_mw=args.qsts_p90_curtailment_tolerance_mw,
+                qsts_expected_curtailment_tolerance_mwh=(
+                    args.qsts_expected_curtailment_tolerance_mwh
+                ),
+                stratified_max_candidates=args.stratified_max_candidates,
+                stratified_top_go_candidates=args.stratified_top_go_candidates,
+                stratified_borderline_candidates=args.stratified_borderline_candidates,
+                stratified_near_threshold_no_go_candidates=(
+                    args.stratified_near_threshold_no_go_candidates
+                ),
+                stratified_constraint_diverse_candidates=(
+                    args.stratified_constraint_diverse_candidates
+                ),
+                full_year_max_candidates=args.full_year_max_candidates,
+                full_year_top_candidates=args.full_year_top_candidates,
+                full_year_borderline_candidates=args.full_year_borderline_candidates,
+                full_year_false_positive_suspects=args.full_year_false_positive_suspects,
+                full_year_bad_controls=args.full_year_bad_controls,
+                run_resize_on_no_go=args.run_resize_on_no_go,
+                resize_min_mw=args.resize_min_mw,
+                resize_step_mw=args.resize_step_mw,
+                resize_selected_policy=args.resize_selected_policy,
+                resize_max_buses=args.resize_max_buses,
+            )
+        )
+    except (ImportError, ValueError) as exc:
+        print(f"run-pipeline error: {exc}")
+        return 2
+    print(f"pipeline: {result.report_path} {result.manifest_path}")
+    return 0
+
+
+def _validate_client_network(args: argparse.Namespace) -> int:
+    result = validate_client_network(args.client_network)
+    outputs = write_client_network_validation(result, args.output)
+    print(f"client-network validation: {outputs.json_path} {outputs.markdown_path}")
+    return 0 if result.valid else 2
 
 
 def _load_sweep_config(path: Path) -> dict[str, object]:
@@ -1058,238 +1282,6 @@ def _write_sampling_calibration(path: Path, rows: list[dict[str, object]]) -> No
         writer.writerows(rows)
 
 
-def _resize_mw_values(requested_mw: float, min_mw: float, step_mw: float) -> list[float]:
-    if requested_mw <= 0:
-        raise ValueError("requested_mw must be positive")
-    if min_mw <= 0:
-        raise ValueError("min_mw must be positive")
-    if min_mw > requested_mw:
-        raise ValueError("min_mw must be less than or equal to requested_mw")
-    if step_mw <= 0:
-        raise ValueError("step_mw must be positive")
-
-    values: list[float] = []
-    current = requested_mw
-    while current >= min_mw - 1e-9:
-        values.append(round(current, 6))
-        current -= step_mw
-    if abs(values[-1] - min_mw) > 1e-9:
-        values.append(round(min_mw, 6))
-    return values
-
-
-def _resize_result_row(
-    result,
-    scenario_dir: Path,
-    original_requested_mw: float,
-    *,
-    selected_policy: str,
-) -> dict[str, object]:
-    if not result.buses:
-        raise ValueError("qsts-resize scenario returned no bus results")
-    bus = result.buses[0]
-    driver = _qsts_verdict_driver(
-        bus.curtailment,
-        p90_tolerance_mw=result.request.p90_curtailment_tolerance_mw,
-        mwh_tolerance=result.request.expected_curtailment_tolerance_mwh,
-    )
-    economics = _qsts_economics_proxy(result)
-    policy_verdicts = _resize_policy_verdicts(
-        result.request,
-        bus,
-        evaluated_time_steps=result.performance.evaluated_time_steps,
-    )
-    selected_policy_verdict = policy_verdicts.get(selected_policy, bus.qsts_verdict)
-    product_decision = _resize_product_decision(
-        selected_policy_verdict,
-        requested_mw=result.request.requested_mw,
-        original_requested_mw=original_requested_mw,
-    )
-    return {
-        "requested_mw": f"{result.request.requested_mw:.6f}",
-        "original_requested_mw": f"{original_requested_mw:.6f}",
-        "delta_mw_from_original": f"{max(original_requested_mw - result.request.requested_mw, 0.0):.6f}",
-        "bus_id": bus.bus_id,
-        "bus_name": bus.bus_name,
-        "qsts_verdict": bus.qsts_verdict,
-        "legacy_qsts_verdict": bus.qsts_verdict,
-        "selected_policy": selected_policy,
-        "strict_policy_verdict": policy_verdicts.get("strict", ""),
-        "standard_policy_verdict": policy_verdicts.get("standard", ""),
-        "flexible_policy_verdict": policy_verdicts.get("flexible", ""),
-        "aggressive_policy_verdict": policy_verdicts.get("aggressive", ""),
-        "product_decision": product_decision,
-        "acceptable": str(_resize_acceptable(selected_policy_verdict)),
-        "validation_level": _validation_level(result.request, result.performance.evaluated_time_steps),
-        "decision_confidence": _decision_confidence(
-            result.request,
-            result.performance.evaluated_time_steps,
-        ),
-        "recommended_next_action": _recommended_next_action(
-            bus.qsts_verdict,
-            driver,
-            result.request,
-            result.performance.evaluated_time_steps,
-        ),
-        "expected_curtailment_mwh": f"{bus.curtailment.expected_mwh:.6f}",
-        "p90_curtailment_mw": f"{bus.curtailment.p90_mw:.6f}",
-        "verdict_driver": driver,
-        "main_recurring_constraint": bus.main_recurring_constraint,
-        "delta_npv_eur": f"{economics.delta_npv_eur:.6f}",
-        "runtime_seconds": f"{result.performance.runtime_seconds:.6f}",
-        "qsts_output_dir": scenario_dir.as_posix(),
-    }
-
-
-def _resize_acceptable(qsts_verdict: str) -> bool:
-    return qsts_verdict in {"go", "go-with-conditions"}
-
-
-def _resize_policy_verdicts(
-    request: QstsRequest,
-    bus: object,
-    evaluated_time_steps: int | None,
-) -> dict[str, str]:
-    max_event_hours, max_event_mwh = _bus_max_curtailment_event(bus)
-    rows = decision_frontier_rows(
-        bus_id=bus.bus_id,
-        bus_name=bus.bus_name,
-        requested_mw=bus.requested_mw,
-        qsts_p90_mw=bus.curtailment.p90_mw,
-        weighted_curtailment_mwh=bus.weighted_curtailment_mwh,
-        curtailment_energy_ratio=bus.curtailment_energy_ratio,
-        max_event_hours=max_event_hours,
-        max_event_mwh=max_event_mwh,
-        validation_level=_validation_level(request, evaluated_time_steps),
-    )
-    return {row.policy: row.frontier_verdict for row in rows}
-
-
-def _resize_product_decision(
-    qsts_verdict: str,
-    requested_mw: float,
-    original_requested_mw: float,
-) -> str:
-    if not _resize_acceptable(qsts_verdict):
-        return "no-go"
-    if requested_mw < original_requested_mw - 1e-9:
-        return "resize-recommended"
-    return qsts_verdict
-
-
-def _write_resize_results(path: Path, rows: list[dict[str, object]]) -> None:
-    fieldnames = [
-        "requested_mw",
-        "original_requested_mw",
-        "delta_mw_from_original",
-        "bus_id",
-        "bus_name",
-        "qsts_verdict",
-        "legacy_qsts_verdict",
-        "selected_policy",
-        "strict_policy_verdict",
-        "standard_policy_verdict",
-        "flexible_policy_verdict",
-        "aggressive_policy_verdict",
-        "product_decision",
-        "acceptable",
-        "validation_level",
-        "decision_confidence",
-        "recommended_next_action",
-        "expected_curtailment_mwh",
-        "p90_curtailment_mw",
-        "verdict_driver",
-        "main_recurring_constraint",
-        "delta_npv_eur",
-        "runtime_seconds",
-        "qsts_output_dir",
-    ]
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def _render_resize_summary(
-    rows: list[dict[str, object]],
-    bus_id: int,
-    original_requested_mw: float,
-) -> str:
-    recommended = _recommended_resize_row(rows)
-    if recommended is None:
-        recommendation = (
-            f"Bus {bus_id} is not acceptable at {original_requested_mw:.3f} MW and no "
-            "tested lower MW met the selected decision-frontier policy."
-        )
-        recommended_line = "- recommended_resized_mw: none"
-    else:
-        recommended_mw = float(str(recommended["requested_mw"]))
-        delta_mw = float(str(recommended["delta_mw_from_original"]))
-        selected_policy = str(recommended["selected_policy"])
-        selected_policy_verdict = str(recommended[f"{selected_policy}_policy_verdict"])
-        recommendation = (
-            f"Bus {bus_id} is not acceptable at {original_requested_mw:.3f} MW, but is "
-            f"acceptable at {recommended_mw:.3f} MW under selected policy "
-            f"`{selected_policy}` with policy verdict `{selected_policy_verdict}`."
-        )
-        recommended_line = (
-            f"- product_decision: {recommended['product_decision']}\n"
-            f"- selected_policy: {selected_policy}\n"
-            f"- selected_policy_verdict: {selected_policy_verdict}\n"
-            f"- recommended_resized_mw: {recommended_mw:.3f}\n"
-            f"- delta_mw_from_original: {delta_mw:.3f}\n"
-            f"- delta_npv_eur: {float(str(recommended['delta_npv_eur'])):.2f}"
-        )
-    return f"""# QSTS Resize Summary
-
-This resize workflow is a buyer-side pre-feasibility aid. It does not replace an
-official connection study or PTF.
-
-## Recommendation
-
-{recommended_line}
-- original_requested_mw: {original_requested_mw:.3f}
-- bus_id: {bus_id}
-
-{recommendation}
-
-## Tested MW
-
-{_render_resize_table(rows)}
-"""
-
-
-def _recommended_resize_row(rows: list[dict[str, object]]) -> dict[str, object] | None:
-    acceptable = [row for row in rows if row["acceptable"] == "True"]
-    if not acceptable:
-        return None
-    return max(acceptable, key=lambda row: float(str(row["requested_mw"])))
-
-
-def _render_resize_table(rows: list[dict[str, object]]) -> str:
-    if not rows:
-        return "No resize scenarios were evaluated."
-    lines = [
-        "| requested_mw | product_decision | verdict | acceptable | expected_mwh | p90_mw | delta_npv_eur | driver | output |",
-        "| ---: | --- | --- | --- | ---: | ---: | ---: | --- | --- |",
-    ]
-    for row in rows:
-        lines.append(
-            "| "
-            f"{float(str(row['requested_mw'])):.3f} | {row['product_decision']} | "
-            f"{row['qsts_verdict']} | "
-            f"{row['acceptable']} | {float(str(row['expected_curtailment_mwh'])):.3f} | "
-            f"{float(str(row['p90_curtailment_mw'])):.3f} | "
-            f"{float(str(row['delta_npv_eur'])):.2f} | {row['verdict_driver']} | "
-            f"{row['qsts_output_dir']} |"
-        )
-    return "\n".join(lines)
-
-
-def _slug_mw(value: float) -> str:
-    return f"{value:.3f}".rstrip("0").rstrip(".").replace(".", "p")
-
-
 def _parse_bus_ids(value: str | None) -> tuple[int, ...]:
     if not value:
         return ()
@@ -1299,6 +1291,35 @@ def _parse_bus_ids(value: str | None) -> tuple[int, ...]:
         if not item:
             continue
         bus_ids.append(int(item))
+    return tuple(bus_ids)
+
+
+def _qsts_bus_ids_from_args(args: argparse.Namespace) -> tuple[int, ...]:
+    explicit = _parse_bus_ids(args.bus_ids)
+    if explicit:
+        return explicit
+    csv_path = getattr(args, "bus_ids_csv", None)
+    if csv_path is None:
+        return ()
+    return _parse_bus_ids_csv(csv_path)
+
+
+def _parse_bus_ids_csv(path: Path) -> tuple[int, ...]:
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = list(csv.DictReader(handle))
+    if rows and "bus_id" not in rows[0]:
+        raise ValueError("bus IDs CSV must include a bus_id column")
+    bus_ids: list[int] = []
+    seen: set[int] = set()
+    for row in rows:
+        value = row.get("bus_id", "").strip()
+        if not value:
+            continue
+        bus_id = int(value)
+        if bus_id in seen:
+            continue
+        seen.add(bus_id)
+        bus_ids.append(bus_id)
     return tuple(bus_ids)
 
 

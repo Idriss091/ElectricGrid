@@ -63,17 +63,21 @@ harmonics, land, physical bay availability, official cost, and official delay ch
 
 ## 8. Bundle
 
-Use `results/investor_bundle_2026-05-19/` as the current demo bundle. Start with:
+Generate the current demo bundle with `docs/demo-pipeline.md`. For a quick local
+check, use the stratified smoke pipeline. For investor-facing claims, run the full-year
+pipeline as a longer job.
 
-- `investor_report.html`
-- `scorecard.md`
-- `README.md`
-- `validation_matrix.md`
+Start with:
+
+- `pipeline_report.md`
+- `pipeline_manifest.json`
+- `investor_report.html` when full-year bundle generation is enabled
+- `scorecard.md` when full-year bundle generation is enabled
+- `validation/validation_matrix.md` when full-year validation is available
 - `qsts_results.csv`
 - `qsts_risk_summary.csv`
-- `resize_results.csv`
 - `contractual_envelope.csv`
-- `run_manifest.json`
+- `qsts_stratified/run_manifest.json` or `qsts_full_year/run_manifest.json`
 
 Use `next_calibration_campaign.md` to plan the next evidence expansion when more
 compute time is available.

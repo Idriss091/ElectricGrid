@@ -1,7 +1,10 @@
 # Investor Demo Script
 
-This script supports a 10-minute walkthrough of the canonical BESS flexible-connection
-demo under `results/demo_investor_2026-05-18/`.
+This is the historical manual demo script. For the current reproducible demo, start
+with `docs/demo-pipeline.md` and generate a fresh local bundle under `results/`.
+
+Use this file only as narrative support for a 10-minute walkthrough of the BESS
+flexible-connection thesis.
 
 ## Demo Setup
 
@@ -28,60 +31,52 @@ no-go, or go-with-conditions recommendation.
 
 ### 2. Static Screening
 
-Open:
+Open the generated pipeline outputs:
 
-- `results/demo_investor_2026-05-18/screen_5mw/screening_summary.md`
-- `results/demo_investor_2026-05-18/screen_5mw/screening.csv`
+- `results/demo_pipeline_stratified_smoke/screening/screening_summary.md`
+- `results/demo_pipeline_stratified_smoke/screening/screening.csv`
 
 Explain that static screening ranks active MV candidate buses using steady-state
 pandapower checks. It is a fast proxy layer for site prioritization.
 
-Command:
+Current command:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m thesegrid.cli screen \
+thesegrid run-pipeline \
   --network 1-MV-rural--0-sw \
   --requested-mw 5 \
-  --output results/demo_investor_2026-05-18/screen_5mw
+  --max-buses 3 \
+  --stratified-max-candidates 1 \
+  --run-qsts-stratified \
+  --output results/demo_pipeline_stratified_smoke
 ```
 
 ### 3. QSTS Validation
 
 Open:
 
-- `results/demo_investor_2026-05-18/qsts_representative_stratified_tol3_mwh60/qsts_summary.md`
-- `results/demo_investor_2026-05-18/qsts_representative_stratified_tol3_mwh60/investment_memo.md`
-- `results/demo_investor_2026-05-18/qsts_bus2_full_year_tol3_mwh60/qsts_summary.md`
+- `results/demo_pipeline_stratified_smoke/qsts_stratified/qsts_summary.md`
+- `results/demo_pipeline_stratified_smoke/qsts_stratified/investment_memo.md`
+- `results/demo_pipeline_stratified_smoke/pipeline_report.md`
 
 Explain that QSTS is the higher-evidence layer because it replays time-varying network
 operating points and compares candidate-caused violations against a no-candidate
 baseline.
 
-Command:
+For full-year evidence, use the long-running command in `docs/demo-pipeline.md`.
+Full-year QSTS should be treated as a job, not as a quick interactive smoke check.
+
+Historical lower-level full-year command shape:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m thesegrid.cli qsts \
+thesegrid qsts \
   --network 1-MV-rural--0-sw \
-  --screening-csv results/demo_investor_2026-05-18/screen_5mw/screening.csv \
-  --requested-mw 5 \
-  --bus-ids 2,21,24 \
-  --stratified-sample \
-  --p90-curtailment-tolerance-mw 3 \
-  --expected-curtailment-tolerance-mwh 60 \
-  --output results/demo_investor_2026-05-18/qsts_representative_stratified_tol3_mwh60
-```
-
-The demo also includes a full-year top-1 calibration run for bus 2:
-
-```bash
-PYTHONPATH=src .venv/bin/python -m thesegrid.cli qsts \
-  --network 1-MV-rural--0-sw \
-  --screening-csv results/demo_investor_2026-05-18/screen_5mw/screening.csv \
+  --screening-csv <screening.csv> \
   --requested-mw 5 \
   --bus-ids 2 \
   --p90-curtailment-tolerance-mw 3 \
   --expected-curtailment-tolerance-mwh 60 \
-  --output results/demo_investor_2026-05-18/qsts_bus2_full_year_tol3_mwh60 \
+  --output results/<full_year_job> \
   --progress-every-n-hours 2000
 ```
 
@@ -117,10 +112,10 @@ PTF or official offer.
 
 ### 6. Calibration Sweep
 
-For the MVP investor calibration campaign, use:
+For the MVP investor calibration campaign, use a dedicated generated output directory:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m thesegrid.cli qsts-sweep \
+thesegrid qsts-sweep \
   --config experiments/investor_mvp_calibration.json \
   --output results/investor_mvp_2026-05-18/qsts_calibration
 ```
@@ -134,9 +129,9 @@ When a requested MW is rejected, use `qsts-resize` to find the largest lower MW 
 meets the selected decision-frontier policy:
 
 ```bash
-PYTHONPATH=src .venv/bin/python -m thesegrid.cli qsts-resize \
+thesegrid qsts-resize \
   --network 1-MV-rural--0-sw \
-  --screening-csv results/demo_investor_2026-05-18/screen_5mw/screening.csv \
+  --screening-csv <screening.csv> \
   --bus-id 24 \
   --requested-mw 5 \
   --min-mw 2 \
@@ -144,7 +139,7 @@ PYTHONPATH=src .venv/bin/python -m thesegrid.cli qsts-resize \
   --p90-curtailment-tolerance-mw 3 \
   --expected-curtailment-tolerance-mwh 60 \
   --selected-policy standard \
-  --output results/demo_investor_2026-05-18/resize_bus24
+  --output results/<resize_job>
 ```
 
 ### 8. Close

@@ -57,7 +57,8 @@ validation is added for the best-ranked buses.
 
 The first QSTS workflow validates top-ranked BESS candidates from a screening CSV:
 
-1. Load `screening.csv` and select the top N rows by screening rank.
+1. Load `screening.csv` and select a balanced shortlist, not only the top N rows by
+   screening rank.
 2. Load the same SimBench network and its annual load, generation, and storage
    profiles.
 3. Convert sub-hourly SimBench profiles to hourly profiles when needed for the MVP
@@ -94,6 +95,36 @@ QSTS output must state that it is based on actual hourly power-flow validation a
 that verdicts are baseline-aware. It must also state that the study still excludes
 short-circuit, protection, dynamic stability, N-1 security, harmonic limits, and
 official operator planning criteria.
+
+### Candidate funnel policy
+
+The QSTS campaign should follow an evidence funnel:
+
+| stage | selection rule | target for about 100 eligible buses |
+| --- | --- | ---: |
+| screening | all eligible active MV candidate buses | all |
+| short QSTS | one top `go`, one borderline, one constrained/no-go control | 3 |
+| stratified QSTS | mix of top `go`, borderline, near-threshold `no-go`, and electrically diverse constraints | 10-12 |
+| full-year QSTS | final commercial candidates plus one or two calibration controls | 3-5 |
+| memo | sites with full-year evidence, or explicit `requires_full_year_validation` caveat | 1-2 |
+
+The stratified shortlist should normally include:
+
+- 4-5 best screening `go` candidates;
+- 3 borderline `go-with-conditions` or near-threshold candidates;
+- 2 screening `no-go` candidates close to the requested MW threshold;
+- 1-2 electrically diverse or constraint-diverse controls.
+
+Full-year QSTS should not default to every stratified bus. The default full-year
+selection is intentionally smaller: two top stratified `go` candidates, two borderline
+candidates, and one high-risk control when available. Wider full-year campaigns are
+research calibration runs, not the normal investor workflow.
+
+Use `thesegrid select-stratified-candidates` immediately after screening to write the
+balanced stratified shortlist. The output CSV includes `bus_id` and selection buckets;
+pass it to `thesegrid qsts --stratified-sample --bus-ids-csv ...`. After the
+stratified QSTS run, use `thesegrid select-full-year-candidates` to select the smaller
+full-year finalist set.
 
 ## Product outputs
 

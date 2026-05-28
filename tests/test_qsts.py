@@ -593,6 +593,40 @@ def test_cli_qsts_accepts_forced_bus_ids(tmp_path, monkeypatch):
     assert captured["request"].bus_ids == (31, 14)
 
 
+def test_cli_qsts_accepts_bus_ids_from_selection_csv(tmp_path, monkeypatch):
+    captured = {}
+    selected = tmp_path / "stratified_candidates.csv"
+    selected.write_text(
+        "bus_id,selection_bucket\n31,top_go\n14,borderline\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_qsts(request, settings=None):
+        captured["request"] = request
+        return QstsResult(request=request, buses=())
+
+    monkeypatch.setattr("thesegrid.cli.run_qsts", fake_run_qsts)
+
+    exit_code = main(
+        [
+            "qsts",
+            "--network",
+            "1-MV-rural--0-sw",
+            "--screening-csv",
+            str(tmp_path / "screening.csv"),
+            "--requested-mw",
+            "0.5",
+            "--bus-ids-csv",
+            str(selected),
+            "--output",
+            str(tmp_path / "out"),
+        ]
+    )
+
+    assert exit_code == 0
+    assert captured["request"].bus_ids == (31, 14)
+
+
 def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
     screening_csv = tmp_path / "screening.csv"
     _write_screening_csv(
