@@ -71,7 +71,8 @@ Use `docs/decision-policy.md` for the current rule that separates `screening_onl
 - `run_manifest.json`: reproducibility record with request, settings, outputs,
   environment, package version, and git state.
 - `qsts_performance.json`: runtime and power-flow counter diagnostics.
-- `experiments/investor_mvp_calibration.json`: canonical MVP calibration sweep config.
+- `experiments/simbench_standard_policy_campaign_v1.json`: current multi-network
+  calibration campaign definition.
 
 ## France BESS Language
 
@@ -80,31 +81,19 @@ injection/soutirage, capacite d'accueil, zone contrainte, and offre optimisee. T
 terms are interpretive labels for buyer-side pre-feasibility. The generated memo is not
 a PTF, not an official RTE/Enedis offer, and not an official connection study.
 
-## Reading The Demo Result
+## Reading Current Results
 
-Current generated results are local artifacts under `results/`. Regenerate them with
-`docs/demo-pipeline.md`.
+Current generated results are local artifacts under `results/`. Regenerate a single
+demo with `docs/demo-pipeline.md`, or use
+`experiments/simbench_standard_policy_campaign_v1.json` for the current multi-network
+calibration campaign.
 
-Historical calibration runs showed this pattern in
-`results/demo_investor_2026-05-18/qsts_representative_stratified_tol3_mwh60/`:
+For investor-facing decisions, read `decision_frontier.csv` and the selected-policy
+fields in `validation_matrix.csv`. The default selected policy is `standard`, which
+uses ratio-based thresholds rather than fixed MW/MWh values.
 
-- Bus 2 is a `go`: QSTS P90 MW is 0 and expected curtailed MWh is 0.
-- Bus 21 is a `no-go`: QSTS P90 MW is 2.148 MW, within the 3 MW tolerance, but expected
-  curtailed energy is 165.703 MWh, above the 60 MWh tolerance.
-- Bus 24 is a `no-go`: QSTS P90 MW is 2.617 MW, within the 3 MW tolerance, but expected
-  curtailed energy is 206.094 MWh, above the 60 MWh tolerance.
-
-This is the main decision lesson: a site can look acceptable on P90 MW while still being
-unacceptable on annual or sampled curtailed energy.
-
-The historical full-year calibration run under
-`results/demo_investor_2026-05-18/qsts_bus2_full_year_tol3_mwh60/` strengthens that
-lesson. Bus 2 changes from stratified `go` to full-year `no-go`: QSTS P90 MW remains
-0, but expected curtailed energy reaches 120.977 MWh across 52 curtailment hours. The
-dominant incremental constraint is high voltage around bus 15.
-
-Use the stratified run for quick triage and explanation. Use the full-year run when the
-decision needs a stronger annual-risk basis.
+Use stratified QSTS for quick triage and comparison. Use full-year QSTS when the decision
+needs a stronger annual-risk basis.
 
 ## Contractual Envelope
 

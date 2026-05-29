@@ -147,16 +147,12 @@ Product decisions are:
 
 `qsts_full_year` is the MVP reference layer, not an official grid-connection study.
 
-## Current Demo Interpretation
+## Current Campaign Interpretation
 
-The canonical demo under `results/demo_investor_2026-05-18/` shows why this policy is
-needed:
+Use `experiments/simbench_standard_policy_campaign_v1.json` for the current
+multi-network calibration campaign. The default investor-facing decision is the
+`standard` policy frontier, not the legacy absolute `qsts_verdict`.
 
-- bus 2 is `go` in the stratified run;
-- bus 2 becomes `no-go` in the full-year run because expected curtailed energy reaches
-  120.977 MWh while P90 remains 0 MW;
-- buses 21 and 24 exceed the 60 MWh tolerance in the stratified run despite P90 remaining
-  below the 3 MW tolerance.
-
-The product conclusion is: short and stratified QSTS are useful for triage and demo, but
-full-year QSTS is required before presenting an investor-grade recommendation.
+The product conclusion is: short and stratified QSTS are useful for triage and
+comparison, but full-year QSTS is required before presenting an investor-grade
+recommendation.

@@ -88,8 +88,8 @@ The first QSTS workflow validates top-ranked BESS candidates from a screening CS
     scientific metrics and runtime cost.
 14. For calibrated demo cases, write `validation_matrix.csv` and `validation_matrix.md`
     to compare screening, short QSTS, stratified QSTS, and full-year QSTS verdicts.
-15. For the investor MVP calibration campaign, use `experiments/investor_mvp_calibration.json`
-    as the scenario definition unless a newer dated experiment file supersedes it.
+15. For the current calibration campaign, use
+    `experiments/simbench_standard_policy_campaign_v1.json` as the scenario definition.
 
 QSTS output must state that it is based on actual hourly power-flow validation and
 that verdicts are baseline-aware. It must also state that the study still excludes

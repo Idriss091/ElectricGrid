@@ -51,13 +51,11 @@ For each policy:
 The original QSTS verdict remains available. The frontier table is a sensitivity view
 used to explain where the decision boundary sits.
 
-## Current lesson from the demo
+## Current Campaign Lesson
 
-Bus 21 at 3 MW has a low P90 curtailment value, but the annual curtailed MWh is high
-enough to fail strict, standard, and flexible policies.
-
-Bus 24 at 3 MW is structurally constrained in the full-year run and fails all practical
-policies.
+The current calibration campaign should evaluate each candidate against ratio-based
+policy thresholds, not fixed absolute MW/MWh values. A candidate can pass a P90 power
+threshold while still failing the annual energy or maximum-event thresholds.
 
 This supports the product thesis: P90 MW alone is not enough. The investor decision also
 needs annual energy, frequency of curtailment, and economics.

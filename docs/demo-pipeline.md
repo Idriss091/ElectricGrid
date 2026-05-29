@@ -30,8 +30,8 @@ thesegrid run-pipeline \
   --stratified-borderline-candidates 0 \
   --stratified-near-threshold-no-go-candidates 0 \
   --stratified-constraint-diverse-candidates 0 \
-  --qsts-p90-curtailment-tolerance-mw 3 \
-  --qsts-expected-curtailment-tolerance-mwh 60 \
+  --qsts-p90-curtailment-tolerance-mw 0.5 \
+  --qsts-expected-curtailment-tolerance-mwh 438 \
   --qsts-progress-every-n-hours 0 \
   --run-qsts-stratified \
   --output results/demo_pipeline_stratified_smoke
@@ -49,8 +49,8 @@ thesegrid run-pipeline \
   --full-year-top-candidates 1 \
   --full-year-borderline-candidates 0 \
   --full-year-bad-controls 0 \
-  --qsts-p90-curtailment-tolerance-mw 3 \
-  --qsts-expected-curtailment-tolerance-mwh 60 \
+  --qsts-p90-curtailment-tolerance-mw 0.5 \
+  --qsts-expected-curtailment-tolerance-mwh 438 \
   --run-qsts-stratified \
   --run-qsts-full-year \
   --run-resize-on-no-go \
@@ -64,6 +64,15 @@ Use a lower `--max-buses` or keep `--full-year-max-candidates 1` while iterating
 Increase the finalist count only when runtime is acceptable. Full-year QSTS can take
 several minutes per finalist on a laptop and should be treated as a job, not a quick
 unit-test-style check.
+
+The demo commands use the default investor-facing `standard` policy converted to
+absolute CLI tolerances for a 5 MW request:
+
+- P90 curtailment tolerance: `5 MW * 10% = 0.5 MW`;
+- expected curtailed-energy tolerance: `5 MW * 8760 h * 1% = 438 MWh`.
+
+For other requested MW values, scale these two legacy CLI tolerances from the policy
+ratios rather than reusing the 5 MW absolute values.
 
 ## Required Outputs
 

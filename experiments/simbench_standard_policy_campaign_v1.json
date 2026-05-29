@@ -1,0 +1,46 @@
+{
+  "name": "simbench_standard_policy_campaign_v1",
+  "description": "Current multi-network BESS calibration campaign using Thesegrid standard policy ratios converted to absolute CLI tolerances.",
+  "networks": [
+    "1-MV-rural--0-sw",
+    "1-MV-semiurb--0-sw",
+    "1-MV-urban--0-sw",
+    "1-MV-comm--0-sw"
+  ],
+  "scale_check_networks": [
+    "1-HVMV-urban-2.203-0-sw"
+  ],
+  "requested_mw": [5.0],
+  "selected_policy": "standard",
+  "policy_ratios": {
+    "p90_curtailment_ratio": 0.1,
+    "curtailment_energy_ratio": 0.01,
+    "max_event_hours": 12,
+    "max_event_mwh_per_mw": 1.0
+  },
+  "absolute_tolerances_by_requested_mw": {
+    "5.0": {
+      "p90_curtailment_tolerance_mw": 0.5,
+      "expected_curtailment_tolerance_mwh": 438.0
+    }
+  },
+  "screening": {
+    "max_buses": 40,
+    "top_n": 10
+  },
+  "stratified_qsts": {
+    "max_candidates": 8,
+    "progress_every_n_hours": 500
+  },
+  "full_year_selection": {
+    "buses_per_network": 2,
+    "selection_rule": "Select one best candidate and one risk candidate from stratified QSTS results."
+  },
+  "resize": {
+    "run_on": "full_year_no_go_candidates_with_commercial_interest",
+    "max_buses": 2,
+    "min_mw": 1.0,
+    "step_mw": 1.0,
+    "selected_policy": "standard"
+  }
+}
