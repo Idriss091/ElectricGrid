@@ -16,4 +16,4 @@ It helps decide:
 - whether connecting now under constraints is better than waiting for grid reinforcement.
 
 The product is not a replacement for official grid studies.
-It is an early-stage decision tool for developers, consultants, and site-selection teams.
+It is an early-stage decision tool for developers, consultants, and site-selection teams
