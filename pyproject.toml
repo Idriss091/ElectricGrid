@@ -16,11 +16,15 @@ build-backend = "setuptools.build_meta"
 
 [project.scripts]
 thesegrid = "thesegrid.cli:main"
+thesegrid-ui = "thesegrid.ui:main"
 
 [project.optional-dependencies]
 dev = [
     "pytest",
     "ruff",
+]
+ui = [
+    "streamlit",
 ]
 
 [tool.pytest.ini_options]

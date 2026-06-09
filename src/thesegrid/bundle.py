@@ -349,12 +349,14 @@ focused on BESS France and buyer-side pre-feasibility.
 
 ## Recommended Matrix
 
-- Network: add 1-2 additional SimBench MV networks after `1-MV-rural--0-sw`.
-- Buses: screen all eligible MV buses, run 3-bus short QSTS smoke checks, run stratified
-  QSTS on a balanced 10-12 bus shortlist, then run full-year QSTS on 3-5 final or
-  calibration buses.
-- Requested MW values: 2, 3, 5, and 7 MW.
-- Tolerances: P90 = 0, 1, 3 MW; expected MWh = 0, 60, 120 MWh.
+- Networks: run the four core SimBench MV archetypes:
+  `1-MV-rural--0-sw`, `1-MV-semiurb--0-sw`, `1-MV-urban--0-sw`, and
+  `1-MV-comm--0-sw`.
+- Buses: screen all eligible MV buses, run stratified QSTS on a balanced shortlist, then
+  run full-year QSTS on one best candidate and one risk candidate per network.
+- Requested MW value: start with 5 MW.
+- Decision policy: use the `standard` policy frontier. For 5 MW legacy CLI tolerances,
+  pass P90 = 0.5 MW and expected curtailed energy = 438 MWh.
 - Evidence levels: screening for all candidates, short QSTS for smoke validation,
   stratified QSTS for shortlist comparison, and full-year QSTS only for final
   candidates or calibration controls.
@@ -518,7 +520,7 @@ def _render_decision_matrix(rows: list[dict[str, str]]) -> str:
     if not rows:
         return (
             "<p>No bus-by-MW sweep results available yet. Run "
-            "<code>thesegrid qsts-sweep --config experiments/bus_power_matrix_2026-05-22.json "
+            "<code>thesegrid qsts-sweep --config experiments/simbench_standard_policy_campaign_v1.json "
             "--output results/&lt;run_id&gt;</code>, then copy or aggregate "
             "<code>sensitivity_results.csv</code> into the investor bundle.</p>"
         )
@@ -611,11 +613,7 @@ def _render_recommended_mw_by_bus(rows: list[dict[str, str]]) -> str:
             )
             continue
         verdict = best["qsts_verdict"]
-        next_action = (
-            "run_full_year_conditional_validation"
-            if verdict == "go-with-conditions"
-            else "run_full_year_validation"
-        )
+        next_action = "run_full_year_validation"
         table_rows.append(
             {
                 "bus_id": bus_id,
