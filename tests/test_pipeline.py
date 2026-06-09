@@ -131,6 +131,8 @@ def test_cli_run_pipeline_accepts_stratified_qsts_options(tmp_path, monkeypatch)
             "--run-qsts-full-year",
             "--qsts-duration-hours",
             "24",
+            "--qsts-profile-year",
+            "2024",
             "--qsts-p90-curtailment-tolerance-mw",
             "3",
             "--qsts-expected-curtailment-tolerance-mwh",
@@ -160,6 +162,7 @@ def test_cli_run_pipeline_accepts_stratified_qsts_options(tmp_path, monkeypatch)
     assert request.run_qsts_stratified is True
     assert request.run_qsts_full_year is True
     assert request.qsts_duration_hours == 24
+    assert request.qsts_profile_year == 2024
     assert request.qsts_p90_curtailment_tolerance_mw == 3.0
     assert request.qsts_expected_curtailment_tolerance_mwh == 60.0
     assert request.qsts_voltage_max_pu == 1.04
@@ -297,6 +300,7 @@ def test_run_pipeline_can_run_stratified_qsts_stage(tmp_path, monkeypatch):
             output_dir=output,
             run_qsts_stratified=True,
             qsts_duration_hours=24,
+            qsts_profile_year=2024,
             qsts_p90_curtailment_tolerance_mw=3.0,
             qsts_expected_curtailment_tolerance_mwh=60.0,
         )
@@ -307,6 +311,7 @@ def test_run_pipeline_can_run_stratified_qsts_stage(tmp_path, monkeypatch):
     assert captured["qsts_request"].bus_ids == (12,)
     assert captured["qsts_request"].stratified_sample is True
     assert captured["qsts_request"].duration_hours == 24
+    assert captured["qsts_request"].profile_year == 2024
     assert captured["qsts_request"].p90_curtailment_tolerance_mw == 3.0
     assert captured["qsts_request"].expected_curtailment_tolerance_mwh == 60.0
     assert captured["qsts_command"] == ("run-pipeline", "qsts-stratified")
@@ -430,6 +435,7 @@ def test_run_pipeline_can_run_full_year_qsts_stage(tmp_path, monkeypatch):
             run_qsts_stratified=True,
             run_qsts_full_year=True,
             qsts_duration_hours=24,
+            qsts_profile_year=2024,
             qsts_p90_curtailment_tolerance_mw=3.0,
             qsts_expected_curtailment_tolerance_mwh=60.0,
         )
@@ -439,9 +445,11 @@ def test_run_pipeline_can_run_full_year_qsts_stage(tmp_path, monkeypatch):
     assert len(captured["qsts_requests"]) == 2
     assert captured["qsts_requests"][0].stratified_sample is True
     assert captured["qsts_requests"][0].duration_hours == 24
+    assert captured["qsts_requests"][0].profile_year == 2024
     assert captured["qsts_requests"][1].bus_ids == (12,)
     assert captured["qsts_requests"][1].stratified_sample is False
     assert captured["qsts_requests"][1].duration_hours is None
+    assert captured["qsts_requests"][1].profile_year == 2024
     assert captured["qsts_commands"] == [
         ("run-pipeline", "qsts-stratified"),
         ("run-pipeline", "qsts-full-year"),
@@ -755,6 +763,7 @@ def test_run_pipeline_can_resize_full_year_no_go_finalists(tmp_path, monkeypatch
             resize_min_mw=2.0,
             resize_step_mw=1.0,
             resize_selected_policy="flexible",
+            qsts_profile_year=2024,
         )
     )
 
@@ -763,6 +772,7 @@ def test_run_pipeline_can_resize_full_year_no_go_finalists(tmp_path, monkeypatch
     assert captured["resize_request"].min_mw == 2.0
     assert captured["resize_request"].step_mw == 1.0
     assert captured["resize_request"].selected_policy == "flexible"
+    assert captured["resize_request"].profile_year == 2024
     assert result.resize_results_csv_path == output / "resize" / "resize_results.csv"
     assert (output / "resize_results.csv").exists()
     report = result.report_path.read_text(encoding="utf-8")

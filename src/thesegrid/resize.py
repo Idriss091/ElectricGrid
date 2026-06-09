@@ -60,6 +60,7 @@ class ResizeRequest:
     asset: str = "bess"
     start_hour: int = 0
     duration_hours: int | None = None
+    profile_year: int = 2026
     sample_every_n_hours: int = 1
     stratified_sample: bool = False
     progress_every_n_hours: int = 250
@@ -82,6 +83,8 @@ class ResizeRequest:
         resize_mw_values(self.original_requested_mw, self.min_mw, self.step_mw)
         if self.bus_id < 0:
             raise ValueError("bus_id must be non-negative")
+        if not 1900 <= self.profile_year <= 2100:
+            raise ValueError("profile_year must be between 1900 and 2100")
         if self.selected_policy not in {"strict", "standard", "flexible", "aggressive"}:
             raise ValueError("selected_policy must be strict, standard, flexible, or aggressive")
 
@@ -365,6 +368,7 @@ def _resize_qsts_request(request: ResizeRequest, requested_mw: float) -> QstsReq
         asset=request.asset,
         start_hour=request.start_hour,
         duration_hours=request.duration_hours,
+        profile_year=request.profile_year,
         sample_every_n_hours=request.sample_every_n_hours,
         stratified_sample=request.stratified_sample,
         progress_every_n_hours=request.progress_every_n_hours,

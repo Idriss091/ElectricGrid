@@ -60,6 +60,7 @@ class PipelineRequest:
     run_qsts_stratified: bool = False
     qsts_start_hour: int = 0
     qsts_duration_hours: int | None = None
+    qsts_profile_year: int = 2026
     qsts_sample_every_n_hours: int = 1
     qsts_progress_every_n_hours: int = 250
     qsts_voltage_min_pu: float = 0.95
@@ -99,6 +100,8 @@ class PipelineRequest:
             raise ValueError("run_qsts_full_year requires run_qsts_stratified")
         if self.run_resize_on_no_go and not self.run_qsts_full_year:
             raise ValueError("run_resize_on_no_go requires run_qsts_full_year")
+        if not 1900 <= self.qsts_profile_year <= 2100:
+            raise ValueError("qsts_profile_year must be between 1900 and 2100")
         if self.resize_max_buses <= 0:
             raise ValueError("resize_max_buses must be positive")
         evidence_profile(evidence_level="screening_only", data_source_type=self.data_source_type)
@@ -264,6 +267,7 @@ def run_pipeline(request: PipelineRequest) -> PipelineResult:
                             asset=request.asset,
                             start_hour=0,
                             duration_hours=None,
+                            profile_year=request.qsts_profile_year,
                             sample_every_n_hours=1,
                             stratified_sample=False,
                             progress_every_n_hours=request.qsts_progress_every_n_hours,
@@ -546,6 +550,7 @@ def _qsts_stratified_request(
         asset=request.asset,
         start_hour=request.qsts_start_hour,
         duration_hours=request.qsts_duration_hours,
+        profile_year=request.qsts_profile_year,
         sample_every_n_hours=request.qsts_sample_every_n_hours,
         stratified_sample=True,
         progress_every_n_hours=request.qsts_progress_every_n_hours,
@@ -572,6 +577,7 @@ def _qsts_full_year_request(
         asset=request.asset,
         start_hour=0,
         duration_hours=None,
+        profile_year=request.qsts_profile_year,
         sample_every_n_hours=1,
         stratified_sample=False,
         progress_every_n_hours=request.qsts_progress_every_n_hours,

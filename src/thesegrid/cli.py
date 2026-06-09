@@ -156,6 +156,12 @@ def _build_parser() -> argparse.ArgumentParser:
     qsts.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
     qsts.add_argument("--duration-hours", type=int, help="Number of hourly profile steps to validate")
     qsts.add_argument(
+        "--profile-year",
+        type=int,
+        default=2026,
+        help="Calendar year used to map profile hour indices to timestamps",
+    )
+    qsts.add_argument(
         "--sample-every-n-hours",
         type=int,
         default=1,
@@ -209,6 +215,7 @@ def _build_parser() -> argparse.ArgumentParser:
     qsts.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
     qsts.add_argument("--reinforcement-wait-years", type=float, default=5.0)
     qsts.add_argument("--discount-rate", type=float, default=0.08)
+    _add_selected_policy_argument(qsts, "Decision-frontier policy used for QSTS product decisions")
     _add_power_flow_options(qsts)
     benchmark = subparsers.add_parser(
         "qsts-benchmark",
@@ -242,6 +249,7 @@ def _build_parser() -> argparse.ArgumentParser:
     resize.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
     resize.add_argument("--start-hour", type=int, default=0)
     resize.add_argument("--duration-hours", type=int)
+    resize.add_argument("--profile-year", type=int, default=2026)
     resize.add_argument("--sample-every-n-hours", type=int, default=1)
     resize.add_argument("--stratified-sample", action="store_true")
     resize.add_argument("--voltage-min-pu", type=float, default=0.95)
@@ -398,6 +406,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pipeline.add_argument("--qsts-start-hour", type=int, default=0)
     pipeline.add_argument("--qsts-duration-hours", type=int)
+    pipeline.add_argument("--qsts-profile-year", type=int, default=2026)
     pipeline.add_argument("--qsts-sample-every-n-hours", type=int, default=1)
     pipeline.add_argument("--qsts-progress-every-n-hours", type=int, default=250)
     pipeline.add_argument("--qsts-voltage-min-pu", type=float, default=0.95)
@@ -483,6 +492,12 @@ def _add_qsts_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--asset", default="bess", help="Asset type; V1 supports only 'bess'")
     parser.add_argument("--start-hour", type=int, default=0, help="First hourly profile index to validate")
     parser.add_argument("--duration-hours", type=int, help="Number of hourly profile steps to validate")
+    parser.add_argument(
+        "--profile-year",
+        type=int,
+        default=2026,
+        help="Calendar year used to map profile hour indices to timestamps",
+    )
     parser.add_argument("--sample-every-n-hours", type=int, default=1)
     parser.add_argument("--stratified-sample", action="store_true")
     parser.add_argument("--voltage-min-pu", type=float, default=0.95)
@@ -498,6 +513,16 @@ def _add_qsts_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
     parser.add_argument("--reinforcement-wait-years", type=float, default=5.0)
     parser.add_argument("--discount-rate", type=float, default=0.08)
+    _add_selected_policy_argument(parser, "Decision-frontier policy used for QSTS product decisions")
+
+
+def _add_selected_policy_argument(parser: argparse.ArgumentParser, help_text: str) -> None:
+    parser.add_argument(
+        "--selected-policy",
+        default="standard",
+        choices=["strict", "standard", "flexible", "aggressive"],
+        help=help_text,
+    )
 
 
 def _add_power_flow_options(parser: argparse.ArgumentParser) -> None:
@@ -666,6 +691,7 @@ def _qsts_request_from_args(
         asset=args.asset,
         start_hour=args.start_hour,
         duration_hours=args.duration_hours,
+        profile_year=args.profile_year,
         sample_every_n_hours=args.sample_every_n_hours,
         stratified_sample=args.stratified_sample,
         progress_every_n_hours=args.progress_every_n_hours,
@@ -682,6 +708,7 @@ def _qsts_request_from_args(
         pf_algorithm=args.pf_algorithm,
         pf_init=args.pf_init,
         pf_recycle=args.pf_recycle,
+        selected_policy=args.selected_policy,
     )
 
 
@@ -876,6 +903,7 @@ def _qsts_resize(args: argparse.Namespace) -> int:
                 asset=args.asset,
                 start_hour=args.start_hour,
                 duration_hours=args.duration_hours,
+                profile_year=args.profile_year,
                 sample_every_n_hours=args.sample_every_n_hours,
                 stratified_sample=args.stratified_sample,
                 progress_every_n_hours=args.progress_every_n_hours,
@@ -934,6 +962,7 @@ def _qsts_sweep(args: argparse.Namespace) -> int:
             duration_hours=(
                 int(config["duration_hours"]) if config.get("duration_hours") is not None else None
             ),
+            profile_year=int(config.get("profile_year", 2026)),
             sample_every_n_hours=int(config.get("sample_every_n_hours", 1)),
             stratified_sample=sampling_mode == "stratified",
             p90_curtailment_tolerance_mw=float(scenario["p90_curtailment_tolerance_mw"]),
@@ -1067,6 +1096,7 @@ def _run_pipeline(args: argparse.Namespace) -> int:
                 run_qsts_full_year=args.run_qsts_full_year,
                 qsts_start_hour=args.qsts_start_hour,
                 qsts_duration_hours=args.qsts_duration_hours,
+                qsts_profile_year=args.qsts_profile_year,
                 qsts_sample_every_n_hours=args.qsts_sample_every_n_hours,
                 qsts_progress_every_n_hours=args.qsts_progress_every_n_hours,
                 qsts_voltage_min_pu=args.qsts_voltage_min_pu,

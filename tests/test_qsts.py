@@ -9,19 +9,25 @@ import pandas as pd
 import pytest
 
 from thesegrid.cli import main
+from thesegrid.constraints import ConstraintSettings
 from thesegrid.models import CurtailmentEstimate
 from thesegrid.networks import load_network
 from thesegrid.qsts import (
+    QstsSelectedBus,
     QstsBusResult,
     QstsHourlyRecord,
     QstsPerformanceStats,
     QstsRequest,
     QstsResult,
+    _BaselineState,
+    _evaluate_incremental_dispatch,
     _decision_confidence,
+    _find_max_feasible_with_infeasible_high,
     _datetime_from_record_timestamp,
     _max_curtailment_event,
     _qsts_economics_proxy,
     _run_pandapower_power_flow,
+    _run_qsts_for_bus,
     _profile_time_steps,
     _time_step_weights,
     _recommended_next_action,
@@ -37,8 +43,10 @@ from thesegrid.qsts import (
     select_top_buses_from_screening_csv,
     summarize_qsts_risk,
     summarize_qsts_envelope,
+    weighted_qsts_curtailment_estimate,
     write_qsts_outputs,
 )
+from thesegrid.capacity import DispatchEvaluation
 
 
 def test_select_top_buses_from_screening_csv_uses_rank_order(tmp_path):
@@ -113,6 +121,23 @@ def test_qsts_curtailment_estimate_uses_worst_direction_per_timestamp():
     assert estimate.p90_mw == 1.9
 
 
+def test_weighted_qsts_curtailment_estimate_uses_weighted_tail_quantiles():
+    hourly = pd.DataFrame(
+        {
+            "timestamp": ["low", "low", "rare", "rare"],
+            "direction": ["injection", "withdrawal", "injection", "withdrawal"],
+            "curtailed_mw": [0.0, 0.0, 10.0, 0.0],
+        }
+    )
+
+    estimate = weighted_qsts_curtailment_estimate(hourly, {"low": 99.0, "rare": 1.0})
+
+    assert estimate.expected_hours == 1
+    assert estimate.expected_mwh == 10.0
+    assert estimate.p50_mw == 0.0
+    assert estimate.p90_mw == 0.0
+
+
 def test_qsts_hourly_records_convert_to_public_envelope_records(tmp_path):
     result = _sample_qsts_result(tmp_path)
 
@@ -169,7 +194,7 @@ def test_datetime_from_record_timestamp_maps_integer_hour_without_annual_scan(mo
     def fail_annual_timestamps(_year):
         raise AssertionError("annual_timestamps should not be called for numeric QSTS timestamps")
 
-    monkeypatch.setattr("thesegrid.qsts.annual_timestamps", fail_annual_timestamps)
+    monkeypatch.setattr("thesegrid.qsts_profiles.annual_timestamps", fail_annual_timestamps)
 
     timestamp = _datetime_from_record_timestamp("333")
 
@@ -258,6 +283,16 @@ def test_validation_level_uses_unique_time_steps_not_bus_hours(tmp_path):
 
     assert _validation_level(request, evaluated_time_steps=4380) == "qsts_short"
     assert _decision_confidence(request, evaluated_time_steps=4380) == "low"
+
+
+def test_qsts_request_rejects_invalid_profile_year(tmp_path):
+    with pytest.raises(ValueError, match="profile_year must be between 1900 and 2100"):
+        QstsRequest(
+            network_code="1-MV-rural--0-sw",
+            screening_csv=tmp_path / "screening.csv",
+            requested_mw=5.0,
+            profile_year=1899,
+        )
 
 
 def test_qsts_decision_policy_flags_p90_zero_mwh_tail_risk(tmp_path):
@@ -357,6 +392,26 @@ def test_to_hourly_profile_averages_four_subhourly_steps():
     assert hourly[0].tolist() == [2.5, 12.0]
 
 
+def test_to_hourly_profile_averages_half_hourly_annual_profile_to_8760_hours():
+    profile = pd.DataFrame({0: list(range(17_520))})
+
+    hourly = _to_hourly_profile(profile)
+
+    assert len(hourly) == 8_760
+    assert hourly.iloc[0, 0] == 0.5
+    assert hourly.iloc[-1, 0] == 17_518.5
+
+
+def test_to_hourly_profile_averages_quarter_hourly_leap_year_profile_to_8784_hours():
+    profile = pd.DataFrame({0: list(range(35_136))})
+
+    hourly = _to_hourly_profile(profile)
+
+    assert len(hourly) == 8_784
+    assert hourly.iloc[0, 0] == 1.5
+    assert hourly.iloc[-1, 0] == 35_133.5
+
+
 def test_profile_time_steps_can_use_stratified_sampling_across_time_blocks():
     profiles = {
         "load_p": pd.DataFrame({0: [0.0] * 8760}),
@@ -408,6 +463,31 @@ def test_stratified_time_step_weights_annualize_month_time_blocks(tmp_path):
     assert weights[21] == 31 * 3
 
 
+def test_stratified_time_step_weights_use_profile_year_for_leap_year(tmp_path):
+    request = QstsRequest(
+        network_code="1-MV-rural--0-sw",
+        screening_csv=tmp_path / "screening.csv",
+        requested_mw=5.0,
+        stratified_sample=True,
+        profile_year=2024,
+    )
+    profiles = {
+        "load_p": pd.DataFrame({0: [0.0] * 8784}),
+        "load_q": pd.DataFrame(),
+        "sgen_p": pd.DataFrame(),
+        "sgen_q": pd.DataFrame(),
+        "gen_p": pd.DataFrame(),
+        "storage_p": pd.DataFrame(),
+    }
+    steps = _profile_time_steps(profiles, stratified_sample=True, profile_year=request.profile_year)
+
+    weights = _time_step_weights(steps, request, available_hours=8784)
+
+    assert len(weights) == 84
+    assert sum(weights.values()) == 8784.0
+    assert weights[31 * 24] == 29 * 7
+
+
 def test_classify_incremental_violations_ignores_pre_existing_unworsened_violation():
     baseline = {
         ("bus", 14, "bus.vm_pu.max"): 1.059,
@@ -434,6 +514,220 @@ def test_classify_incremental_violations_reports_new_and_worsened_violations():
         "worsened_by_candidate: bus[14] bus.vm_pu.max=1.062 baseline=1.059",
         "new_candidate_violation: line[1] line.loading_percent=101.000",
     )
+
+
+def test_evaluate_incremental_dispatch_does_not_certify_non_converged_baseline():
+    class FakeEvaluator:
+        def evaluate(self, _direction, _mw):
+            return DispatchEvaluation(feasible=True, violations=())
+
+    result = _evaluate_incremental_dispatch(
+        FakeEvaluator(),
+        "injection",
+        1.0,
+        {("power_flow", -1, "converged"): 0.0},
+    )
+
+    assert result.incrementally_feasible is False
+    assert result.converged is False
+    assert result.incremental_violations == (
+        "baseline_unusable: power_flow[-1] converged=0.000",
+    )
+
+
+def test_evaluate_incremental_dispatch_allows_pre_existing_unworsened_violation():
+    class FakeEvaluator:
+        def evaluate(self, _direction, _mw):
+            return DispatchEvaluation(
+                feasible=False,
+                violations=(
+                    SimpleNamespace(
+                        element_type="line",
+                        element_id=7,
+                        metric="line.loading_percent",
+                        value=103.0,
+                        description="line[7] loading",
+                    ),
+                ),
+            )
+
+    result = _evaluate_incremental_dispatch(
+        FakeEvaluator(),
+        "injection",
+        1.0,
+        {("line", 7, "line.loading_percent"): 103.0},
+    )
+
+    assert result.incrementally_feasible is True
+    assert result.incremental_violations == ()
+    assert result.converged is True
+
+
+def test_evaluate_incremental_dispatch_blocks_worsened_pre_existing_violation():
+    class FakeEvaluator:
+        def evaluate(self, _direction, _mw):
+            return DispatchEvaluation(
+                feasible=False,
+                violations=(
+                    SimpleNamespace(
+                        element_type="line",
+                        element_id=7,
+                        metric="line.loading_percent",
+                        value=104.0,
+                        description="line[7] loading",
+                    ),
+                ),
+            )
+
+    result = _evaluate_incremental_dispatch(
+        FakeEvaluator(),
+        "withdrawal",
+        1.0,
+        {("line", 7, "line.loading_percent"): 103.0},
+    )
+
+    assert result.incrementally_feasible is False
+    assert result.incremental_violations == (
+        "worsened_by_candidate: line[7] line.loading_percent=104.000 baseline=103.000",
+    )
+
+
+def test_find_max_feasible_with_infeasible_high_keeps_last_feasible_capacity():
+    tested: list[float] = []
+
+    def is_feasible(mw):
+        tested.append(mw)
+        return mw <= 2.5
+
+    result = _find_max_feasible_with_infeasible_high(
+        upper_mw=5.0,
+        is_feasible=is_feasible,
+        tolerance_mw=0.1,
+    )
+
+    assert 2.4 <= result <= 2.5
+    assert tested[0] == 2.5
+    assert max(tested) < 5.0
+
+
+def test_run_qsts_records_injection_and_withdrawal_for_each_timestamp(tmp_path, monkeypatch):
+    screening_csv = tmp_path / "screening.csv"
+    _write_screening_csv(
+        screening_csv,
+        [{"rank": "1", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"}],
+    )
+    net = load_network("toy")
+    profiles = {
+        "load_p": pd.DataFrame({0: [0.1, 0.2]}),
+        "load_q": pd.DataFrame({0: [0.01, 0.02]}),
+        "sgen_p": pd.DataFrame(),
+        "sgen_q": pd.DataFrame(),
+        "gen_p": pd.DataFrame(),
+        "storage_p": pd.DataFrame(),
+    }
+    monkeypatch.setattr("thesegrid.qsts.load_network", lambda _network_code: net)
+    monkeypatch.setattr("thesegrid.qsts.load_simbench_power_profiles", lambda _net: profiles)
+
+    result = run_qsts(
+        QstsRequest(
+            network_code="1-MV-rural--0-sw",
+            screening_csv=screening_csv,
+            requested_mw=0.5,
+            top_n=1,
+        )
+    )
+
+    by_timestamp: dict[str, set[str]] = {}
+    for record in result.buses[0].hourly_records:
+        by_timestamp.setdefault(record.timestamp, set()).add(record.direction)
+
+    assert by_timestamp == {
+        "2026-01-01T00:00:00": {"injection", "withdrawal"},
+        "2026-01-01T01:00:00": {"injection", "withdrawal"},
+    }
+
+
+def test_run_qsts_uses_profile_year_for_record_timestamps(tmp_path, monkeypatch):
+    screening_csv = tmp_path / "screening.csv"
+    _write_screening_csv(
+        screening_csv,
+        [{"rank": "1", "bus_id": "1", "firm_capacity_mw": "1.0", "conditional_capacity_mw": "1.0"}],
+    )
+    net = load_network("toy")
+    profiles = {
+        "load_p": pd.DataFrame({0: [0.1, 0.2]}),
+        "load_q": pd.DataFrame({0: [0.01, 0.02]}),
+        "sgen_p": pd.DataFrame(),
+        "sgen_q": pd.DataFrame(),
+        "gen_p": pd.DataFrame(),
+        "storage_p": pd.DataFrame(),
+    }
+    monkeypatch.setattr("thesegrid.qsts.load_network", lambda _network_code: net)
+    monkeypatch.setattr("thesegrid.qsts.load_simbench_power_profiles", lambda _net: profiles)
+
+    result = run_qsts(
+        QstsRequest(
+            network_code="1-MV-rural--0-sw",
+            screening_csv=screening_csv,
+            requested_mw=0.5,
+            top_n=1,
+            profile_year=2024,
+        )
+    )
+
+    assert {record.timestamp for record in result.buses[0].hourly_records} == {
+        "2024-01-01T00:00:00",
+        "2024-01-01T01:00:00",
+    }
+
+
+def test_run_qsts_for_bus_treats_unusable_baseline_as_full_curtailment():
+    baseline = _BaselineState(
+        violations={("power_flow", -1, "converged"): 0.0},
+        binding_constraint="power_flow[-1] pandapower converged=0.000 limit=1.000",
+        min_vm_pu=None,
+        max_vm_pu=None,
+        max_loading_percent=None,
+        converged=False,
+    )
+
+    result = _run_qsts_for_bus(
+        net=load_network("toy"),
+        selected=QstsSelectedBus(
+            rank=1,
+            bus_id=1,
+            bus_name="bus 1",
+            firm_capacity_mw=1.0,
+            conditional_capacity_mw=1.0,
+        ),
+        requested_mw=0.5,
+        profiles={
+            "load_p": pd.DataFrame({0: [0.1]}),
+            "load_q": pd.DataFrame({0: [0.01]}),
+            "sgen_p": pd.DataFrame(),
+            "sgen_q": pd.DataFrame(),
+            "gen_p": pd.DataFrame(),
+            "storage_p": pd.DataFrame(),
+        },
+        time_steps=(0,),
+        settings=ConstraintSettings(),
+        tolerance_mw=0.05,
+        p90_curtailment_tolerance_mw=0.0,
+        expected_curtailment_tolerance_mwh=0.0,
+        baseline_cache={0: baseline},
+    )
+
+    assert result.qsts_verdict == "no-go"
+    assert result.feasible_hours == 0
+    assert result.violation_hours == 1
+    assert result.curtailment.expected_mwh == 0.5
+    assert {record.direction for record in result.hourly_records} == {"injection", "withdrawal"}
+    assert {record.feasible_mw for record in result.hourly_records} == {0.0}
+    assert {record.curtailed_mw for record in result.hourly_records} == {0.5}
+    assert {record.converged for record in result.hourly_records} == {False}
+    assert {
+        record.incremental_binding_constraint for record in result.hourly_records
+    } == {"baseline_unusable: power_flow[-1] converged=0.000"}
 
 
 def test_cli_qsts_refuses_toy_network(tmp_path):
@@ -545,9 +839,13 @@ def test_cli_qsts_passes_constraint_settings(tmp_path, monkeypatch):
             "90",
             "--sample-every-n-hours",
             "3",
+            "--profile-year",
+            "2024",
             "--stratified-sample",
             "--expected-curtailment-tolerance-mwh",
             "1.5",
+            "--selected-policy",
+            "flexible",
             "--output",
             str(tmp_path / "out"),
         ]
@@ -555,8 +853,10 @@ def test_cli_qsts_passes_constraint_settings(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert captured["request"].sample_every_n_hours == 3
+    assert captured["request"].profile_year == 2024
     assert captured["request"].stratified_sample is True
     assert captured["request"].expected_curtailment_tolerance_mwh == 1.5
+    assert captured["request"].selected_policy == "flexible"
     assert captured["settings"].min_vm_pu == 0.94
     assert captured["settings"].max_vm_pu == 1.06
     assert captured["settings"].max_loading_percent == 90.0
@@ -677,6 +977,10 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
     with outputs.results_csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
     assert rows[0]["bus_id"] == "1"
+    assert rows[0]["product_decision"] == "go"
+    assert rows[0]["selected_policy"] == "standard"
+    assert rows[0]["selected_policy_verdict"] == "go"
+    assert rows[0]["legacy_qsts_verdict"] == "go"
     assert rows[0]["qsts_verdict"] == "go"
     assert rows[0]["p90_curtailment_tolerance_mw"] == "0.000000"
     detail = outputs.bus_detail_paths[0].read_text(encoding="utf-8")
@@ -689,7 +993,7 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
     assert "baseline-aware" in summary
     assert "Investor Decision Table" in summary
     assert (
-        "| 1 | 1 | go | qsts_short | low | run_full_year_validation | "
+        "| 1 | 1 | go | standard | go | go | qsts_short | low | run_full_year_validation | "
         "1.000 | 1.000 | 0.000 | 0.000 | - |"
     ) in summary
     assert "Envelope Comparison" in summary
@@ -718,6 +1022,10 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
     assert "static_vs_qsts_comparison.csv" in annual_summary
     with outputs.investor_decision_csv_path.open(newline="", encoding="utf-8") as handle:
         investor_rows = list(csv.DictReader(handle))
+    assert investor_rows[0]["product_decision"] == "go"
+    assert investor_rows[0]["selected_policy"] == "standard"
+    assert investor_rows[0]["selected_policy_verdict"] == "go"
+    assert investor_rows[0]["legacy_qsts_verdict"] == "go"
     assert investor_rows[0]["qsts_verdict"] == "go"
     assert investor_rows[0]["validation_level"] == "qsts_short"
     assert investor_rows[0]["decision_confidence"] == "low"
@@ -762,7 +1070,10 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
     assert "Three-Site Comparison" in memo
     assert "PTF" in memo
     assert "Contractual Envelope Summary" in memo
-    assert "| 1 | 1 | go | 1.000 | 1.000 | 0.500 | 0.500 | 0.000 | 0.000 | - |" in memo
+    assert (
+        "| 1 | 1 | go | standard | go | 1.000 | 1.000 | "
+        "0.500 | 0.500 | 0.000 | 0.000 | - |"
+    ) in memo
     summary = outputs.summary_path.read_text(encoding="utf-8")
     assert "validation_level: qsts_short" in summary
     assert "recommended_next_action" in summary
@@ -1152,6 +1463,7 @@ def test_cli_qsts_sweep_accepts_sampling_modes_and_writes_calibration(tmp_path, 
                 "expected_curtailment_tolerance_mwh": [0.0],
                 "voltage_max_pu": [1.05],
                 "sampling_modes": ["stratified", "full_year"],
+                "profile_year": 2024,
                 "start_hour": 1,
                 "duration_hours": 2,
                 "sample_every_n_hours": 2,
@@ -1192,6 +1504,7 @@ def test_cli_qsts_sweep_accepts_sampling_modes_and_writes_calibration(tmp_path, 
     assert {request.start_hour for request in captured_requests} == {1}
     assert {request.duration_hours for request in captured_requests} == {2}
     assert {request.sample_every_n_hours for request in captured_requests} == {2}
+    assert {request.profile_year for request in captured_requests} == {2024}
     assert {request.bus_ids for request in captured_requests} == {(1,)}
 
 
@@ -1221,7 +1534,7 @@ def test_cli_qsts_resize_recommends_largest_acceptable_mw(tmp_path, monkeypatch)
     captured = []
 
     def fake_run_qsts(request, settings=None):
-        captured.append(request.requested_mw)
+        captured.append(request)
         verdict, expected_mwh, p90_mw = requested_to_verdict[request.requested_mw]
         result = _sample_qsts_result_for_request(request, verdict=verdict)
         bus = result.buses[0]
@@ -1264,6 +1577,8 @@ def test_cli_qsts_resize_recommends_largest_acceptable_mw(tmp_path, monkeypatch)
             "3",
             "--expected-curtailment-tolerance-mwh",
             "60",
+            "--profile-year",
+            "2024",
             "--selected-policy",
             "flexible",
             "--output",
@@ -1272,7 +1587,8 @@ def test_cli_qsts_resize_recommends_largest_acceptable_mw(tmp_path, monkeypatch)
     )
 
     assert exit_code == 0
-    assert captured == [5.0, 4.0, 3.0, 2.0]
+    assert [request.requested_mw for request in captured] == [5.0, 4.0, 3.0, 2.0]
+    assert {request.profile_year for request in captured} == {2024}
     rows = list(csv.DictReader((output / "resize_results.csv").open(encoding="utf-8")))
     assert rows[0]["product_decision"] == "no-go"
     assert rows[-1]["product_decision"] == "resize-recommended"
@@ -1460,6 +1776,11 @@ def test_qsts_outputs_include_weighted_risk_economics_and_frontier(tmp_path):
     assert outputs.decision_frontier_csv_path.exists()
     with outputs.results_csv_path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
+    assert rows[0]["product_decision"] == "no-go"
+    assert rows[0]["selected_policy"] == "standard"
+    assert rows[0]["selected_policy_verdict"] == "no-go"
+    assert rows[0]["legacy_qsts_verdict"] == "go-with-conditions"
+    assert rows[0]["legacy_qsts_verdict"] == rows[0]["qsts_verdict"]
     assert rows[0]["sampled_curtailment_mwh"] == "2.000000"
     assert rows[0]["weighted_curtailment_mwh"] == "2.000000"
     assert rows[0]["curtailment_energy_ratio"] == "0.000046"
