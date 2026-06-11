@@ -77,6 +77,10 @@ def test_cli_portfolio_screen_runs_commercial_workflow(monkeypatch, tmp_path):
     portfolio = tmp_path / "portfolio.csv"
     cartostock = tmp_path / "cartostock.csv"
     fixture = tmp_path / "osm.json"
+    constraints = tmp_path / "constraints.csv"
+    storage = tmp_path / "storage.csv"
+    regional_loads = tmp_path / "regional_loads.csv"
+    eco2mix = tmp_path / "eco2mix.xls"
     output = tmp_path / "output"
     captured = {}
 
@@ -115,6 +119,14 @@ def test_cli_portfolio_screen_runs_commercial_workflow(monkeypatch, tmp_path):
             "35",
             "--osm-fixture",
             str(fixture),
+            "--odre-constraints",
+            str(constraints),
+            "--odre-storage-assets",
+            str(storage),
+            "--odre-regional-loads",
+            str(regional_loads),
+            "--eco2mix-annual",
+            str(eco2mix),
         ]
     )
 
@@ -126,3 +138,7 @@ def test_cli_portfolio_screen_runs_commercial_workflow(monkeypatch, tmp_path):
     assert request.rte7000_revision.startswith("1a2419")
     assert request.search_radius_km == 35.0
     assert request.osm_fixture_path == fixture
+    assert request.odre_constraints_path == constraints
+    assert request.odre_storage_assets_path == storage
+    assert request.odre_regional_loads_path == regional_loads
+    assert request.eco2mix_annual_path == eco2mix

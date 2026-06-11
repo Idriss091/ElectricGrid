@@ -7,6 +7,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from thesegrid.public_data.eco2mix import read_eco2mix_annual
+from thesegrid.public_data.evidence import PublicGridEvidenceProfile, build_public_grid_evidence
+from thesegrid.public_data.odre import (
+    read_regional_constraints,
+    read_regional_load_profiles,
+    read_storage_assets,
+)
+from thesegrid.public_data.sources import local_source_manifest
 from thesegrid.osm_substations import (
     OsmDataAccessError,
     OsmSchemaError,
@@ -50,6 +58,10 @@ class PortfolioWorkflowRequest:
     rte7000_snapshot: str = "2023-01-01T00:00:00"
     search_radius_km: float = 50.0
     osm_fixture_path: Path | None = None
+    odre_constraints_path: Path | None = None
+    odre_storage_assets_path: Path | None = None
+    odre_regional_loads_path: Path | None = None
+    eco2mix_annual_path: Path | None = None
 
     def __post_init__(self) -> None:
         if not 1.0 <= self.search_radius_km <= 100.0:
@@ -132,6 +144,10 @@ def run_portfolio_workflow(
         links_by_site,
         cartostock,
         source_errors=source_errors,
+        public_evidence_profiles=_public_evidence_profiles(
+            request,
+            links_by_site,
+        ),
     )
     source_manifests = (
         _local_file_manifest(request.portfolio_path, "client_portfolio"),
@@ -148,6 +164,7 @@ def run_portfolio_workflow(
         ),
         odre_result.manifest,
         rte_result.manifest,
+        *_public_source_manifests(request),
         *osm_manifests,
     )
     outputs = write_portfolio_screening_outputs(
@@ -157,6 +174,101 @@ def run_portfolio_workflow(
         now=now,
     )
     return PortfolioWorkflowResult(screening=screening, outputs=outputs)
+
+
+def _public_evidence_profiles(
+    request: PortfolioWorkflowRequest,
+    links_by_site: dict[str, tuple[object, ...]],
+) -> tuple[PublicGridEvidenceProfile, ...]:
+    if (
+        request.odre_constraints_path is None
+        and request.odre_storage_assets_path is None
+        and request.odre_regional_loads_path is None
+        and request.eco2mix_annual_path is None
+    ):
+        return ()
+    constraints = (
+        None
+        if request.odre_constraints_path is None or not request.odre_constraints_path.exists()
+        else read_regional_constraints(request.odre_constraints_path).frame
+    )
+    storage = (
+        None
+        if request.odre_storage_assets_path is None or not request.odre_storage_assets_path.exists()
+        else read_storage_assets(request.odre_storage_assets_path).frame
+    )
+    eco2mix = (
+        None
+        if request.eco2mix_annual_path is None or not request.eco2mix_annual_path.exists()
+        else read_eco2mix_annual(request.eco2mix_annual_path).frame
+    )
+    regional_loads = (
+        None
+        if request.odre_regional_loads_path is None
+        or not request.odre_regional_loads_path.exists()
+        else read_regional_load_profiles(request.odre_regional_loads_path).frame
+    )
+    candidates: list[dict[str, str]] = []
+    for site_id, links in links_by_site.items():
+        for link in links:
+            identity = getattr(link, "identity", None)
+            odre_code = "" if identity is None or identity.odre_code is None else identity.odre_code
+            if not odre_code:
+                continue
+            candidates.append(
+                {
+                    "client_site_id": site_id,
+                    "region": _region_for_odre_code(odre_code, constraints, storage),
+                    "odre_code": odre_code,
+                }
+            )
+    if not candidates:
+        return ()
+    return build_public_grid_evidence(
+        site_candidates=candidates,
+        regional_constraints=constraints,
+        storage_assets=storage,
+        regional_load_profiles=regional_loads,
+        eco2mix_annual=eco2mix,
+    )
+
+
+def _public_source_manifests(request: PortfolioWorkflowRequest) -> tuple[object, ...]:
+    paths = (
+        (request.odre_constraints_path, "odre_regional_constraints"),
+        (request.odre_storage_assets_path, "odre_storage_assets"),
+        (request.odre_regional_loads_path, "odre_regional_load_profiles"),
+        (request.eco2mix_annual_path, "eco2mix_annual"),
+    )
+    return tuple(
+        local_source_manifest(path, source_type)
+        for path, source_type in paths
+        if path is not None
+    )
+
+
+def _region_for_odre_code(
+    odre_code: str,
+    regional_constraints: object,
+    storage_assets: object,
+) -> str:
+    normalized_code = _normalize_public_code(odre_code)
+    for frame, code_column in (
+        (regional_constraints, "substation_1"),
+        (storage_assets, "source_substation"),
+    ):
+        if frame is None or code_column not in frame or "region" not in frame:
+            continue
+        rows = frame[
+            frame[code_column].astype(str).map(_normalize_public_code) == normalized_code
+        ]
+        if not rows.empty:
+            return str(rows.iloc[0]["region"])
+    return ""
+
+
+def _normalize_public_code(value: object) -> str:
+    return str(value).strip().upper().lstrip(".")
 
 
 def _snapshot_datetime(value: str) -> datetime:

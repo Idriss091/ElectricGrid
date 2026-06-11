@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import html
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
@@ -23,6 +24,11 @@ Clock = Callable[[], datetime]
 class PortfolioScreeningOutputs:
     ranked_csv_path: Path
     candidates_csv_path: Path
+    public_grid_evidence_csv_path: Path
+    deep_dive_shortlist_csv_path: Path
+    deep_dive_inputs_dir_path: Path
+    site_finder_seed_signals_csv_path: Path
+    bundle_summary_path: Path
     report_path: Path
     map_path: Path
     assumption_register_path: Path
@@ -40,6 +46,11 @@ def write_portfolio_screening_outputs(
     outputs = PortfolioScreeningOutputs(
         ranked_csv_path=output_dir / "portfolio_ranked.csv",
         candidates_csv_path=output_dir / "candidate_substations.csv",
+        public_grid_evidence_csv_path=output_dir / "public_grid_evidence.csv",
+        deep_dive_shortlist_csv_path=output_dir / "deep_dive_shortlist.csv",
+        deep_dive_inputs_dir_path=output_dir / "deep_dive_inputs",
+        site_finder_seed_signals_csv_path=output_dir / "site_finder_seed_signals.csv",
+        bundle_summary_path=output_dir / "portfolio_bundle_summary.json",
         report_path=output_dir / "portfolio_screening_report.md",
         map_path=output_dir / "portfolio_screening_map.html",
         assumption_register_path=output_dir / "source_assumption_register.json",
@@ -47,6 +58,17 @@ def write_portfolio_screening_outputs(
     )
     _write_ranked_csv(result, outputs.ranked_csv_path)
     _write_candidates_csv(result, outputs.candidates_csv_path)
+    _write_public_grid_evidence_csv(result, outputs.public_grid_evidence_csv_path)
+    _write_deep_dive_shortlist_csv(result, outputs.deep_dive_shortlist_csv_path)
+    _write_deep_dive_input_packages(result, outputs.deep_dive_inputs_dir_path)
+    _write_site_finder_seed_signals_csv(
+        result,
+        outputs.site_finder_seed_signals_csv_path,
+    )
+    outputs.bundle_summary_path.write_text(
+        json.dumps(_bundle_summary(result), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
     outputs.report_path.write_text(_render_report(result), encoding="utf-8")
     outputs.map_path.write_text(_render_map(result), encoding="utf-8")
     outputs.assumption_register_path.write_text(
@@ -70,6 +92,13 @@ def write_portfolio_screening_outputs(
         "outputs": {
             "ranked_portfolio": outputs.ranked_csv_path.name,
             "candidate_substations": outputs.candidates_csv_path.name,
+            "public_grid_evidence": outputs.public_grid_evidence_csv_path.name,
+            "deep_dive_shortlist": outputs.deep_dive_shortlist_csv_path.name,
+            "deep_dive_inputs": outputs.deep_dive_inputs_dir_path.name,
+            "site_finder_seed_signals": (
+                outputs.site_finder_seed_signals_csv_path.name
+            ),
+            "bundle_summary": outputs.bundle_summary_path.name,
             "report": outputs.report_path.name,
             "map": outputs.map_path.name,
             "assumption_register": outputs.assumption_register_path.name,
@@ -107,6 +136,8 @@ def _write_ranked_csv(result: PortfolioScreeningResult, path: Path) -> None:
         "flexible_connection_signal_score",
         "public_signal_completeness_score",
         "development_readiness_score",
+        "public_grid_evidence_score",
+        "deep_dive_recommendation",
         "strongest_positive_signals",
         "likely_constraints",
         "missing_evidence",
@@ -166,6 +197,8 @@ def _ranked_row(screening: SiteScreening, policy_version: str) -> dict[str, obje
             "public_signal_completeness"
         ],
         "development_readiness_score": dimensions["development_readiness"],
+        "public_grid_evidence_score": dimensions.get("public_grid_evidence", 0),
+        "deep_dive_recommendation": screening.deep_dive_recommendation,
         "strongest_positive_signals": " | ".join(
             screening.strongest_positive_signals
         ),
@@ -240,6 +273,432 @@ def _write_candidates_csv(result: PortfolioScreeningResult, path: Path) -> None:
             )
 
 
+def _write_public_grid_evidence_csv(result: PortfolioScreeningResult, path: Path) -> None:
+    fieldnames = (
+        "client_site_id",
+        "region",
+        "odre_code",
+        "regional_constraint_count",
+        "dominant_constraint_occurrence",
+        "dominant_constraint_duration",
+        "high_persistence_constraint_count",
+        "battery_storage_kw_region",
+        "battery_storage_kwh_region",
+        "battery_storage_kw_source_substation",
+        "latest_regional_load_date",
+        "eco2mix_coverage_hours",
+        "source_completeness_score",
+        "missing_evidence",
+    )
+    seen: set[tuple[str, str]] = set()
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for candidate in result.candidate_assessments:
+            profile = candidate.public_evidence
+            if profile is None:
+                continue
+            key = (profile.client_site_id, profile.odre_code)
+            if key in seen:
+                continue
+            seen.add(key)
+            writer.writerow(
+                {
+                    "client_site_id": profile.client_site_id,
+                    "region": profile.region,
+                    "odre_code": profile.odre_code,
+                    "regional_constraint_count": profile.regional_constraint_count,
+                    "dominant_constraint_occurrence": profile.dominant_constraint_occurrence,
+                    "dominant_constraint_duration": profile.dominant_constraint_duration,
+                    "high_persistence_constraint_count": (
+                        profile.high_persistence_constraint_count
+                    ),
+                    "battery_storage_kw_region": profile.battery_storage_kw_region,
+                    "battery_storage_kwh_region": profile.battery_storage_kwh_region,
+                    "battery_storage_kw_source_substation": (
+                        profile.battery_storage_kw_source_substation
+                    ),
+                    "latest_regional_load_date": profile.latest_regional_load_date,
+                    "eco2mix_coverage_hours": profile.eco2mix_coverage_hours,
+                    "source_completeness_score": profile.source_completeness_score,
+                    "missing_evidence": " | ".join(profile.missing_evidence),
+                }
+            )
+
+
+def _write_deep_dive_shortlist_csv(
+    result: PortfolioScreeningResult, path: Path
+) -> None:
+    fieldnames = (
+        "portfolio_rank",
+        "client_site_id",
+        "deep_dive_recommendation",
+        "opportunity_class",
+        "total_score",
+        "requested_mw",
+        "storage_duration_hours",
+        "candidate_name",
+        "candidate_distance_km",
+        "candidate_voltage_kv",
+        "candidate_cartostock_id",
+        "candidate_odre_code",
+        "candidate_rte7000_id",
+        "match_confidence",
+        "public_grid_evidence_score",
+        "source_completeness_score",
+        "regional_constraint_count",
+        "latest_regional_load_date",
+        "next_action",
+    )
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for screening in result.ranked_sites:
+            if screening.deep_dive_recommendation not in {
+                "recommended",
+                "conditional",
+            }:
+                continue
+            writer.writerow(_deep_dive_shortlist_row(screening))
+
+
+def _deep_dive_shortlist_row(screening: SiteScreening) -> dict[str, object]:
+    candidate = screening.best_candidate
+    identity = None if candidate is None else candidate.identity
+    profile = None if candidate is None else candidate.public_evidence
+    dimensions = {dimension.name: dimension.points for dimension in screening.dimensions}
+    voltage = _candidate_voltage(candidate)
+    return {
+        "portfolio_rank": screening.portfolio_rank,
+        "client_site_id": screening.site.client_site_id,
+        "deep_dive_recommendation": screening.deep_dive_recommendation,
+        "opportunity_class": screening.opportunity_class,
+        "total_score": screening.total_score,
+        "requested_mw": screening.site.requested_mw,
+        "storage_duration_hours": screening.site.storage_duration_hours,
+        "candidate_name": "" if candidate is None else candidate.substation.name or "",
+        "candidate_distance_km": (
+            "" if candidate is None else f"{candidate.substation.distance_km:.2f}"
+        ),
+        "candidate_voltage_kv": "" if voltage is None else f"{voltage:g}",
+        "candidate_cartostock_id": "" if identity is None else identity.cartostock_id,
+        "candidate_odre_code": (
+            "" if identity is None or identity.odre_code is None else identity.odre_code
+        ),
+        "candidate_rte7000_id": (
+            ""
+            if identity is None or identity.rte7000_id is None
+            else identity.rte7000_id
+        ),
+        "match_confidence": "" if candidate is None else candidate.match_confidence,
+        "public_grid_evidence_score": dimensions.get("public_grid_evidence", 0),
+        "source_completeness_score": (
+            "" if profile is None else profile.source_completeness_score
+        ),
+        "regional_constraint_count": (
+            "" if profile is None else profile.regional_constraint_count
+        ),
+        "latest_regional_load_date": (
+            "" if profile is None else profile.latest_regional_load_date
+        ),
+        "next_action": screening.next_action,
+    }
+
+
+def _write_deep_dive_input_packages(
+    result: PortfolioScreeningResult, directory: Path
+) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    for screening in result.ranked_sites:
+        if screening.deep_dive_recommendation not in {
+            "recommended",
+            "conditional",
+        }:
+            continue
+        path = directory / f"{_safe_filename(screening.site.client_site_id)}.json"
+        path.write_text(
+            json.dumps(
+                _deep_dive_input_package(screening, result.policy_version),
+                indent=2,
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
+def _write_site_finder_seed_signals_csv(
+    result: PortfolioScreeningResult, path: Path
+) -> None:
+    fieldnames = (
+        "seed_rank",
+        "source_client_site_id",
+        "candidate_name",
+        "region",
+        "odre_code",
+        "rte7000_id",
+        "cartostock_id",
+        "voltage_kv",
+        "source_site_distance_km",
+        "opportunity_class",
+        "deep_dive_recommendation",
+        "total_score",
+        "public_grid_evidence_score",
+        "source_completeness_score",
+        "regional_constraint_count",
+        "battery_storage_kw_region",
+        "battery_storage_kw_source_substation",
+        "latest_regional_load_date",
+        "seed_use",
+    )
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for rank, screening in enumerate(_site_finder_seed_screenings(result), start=1):
+            writer.writerow(_site_finder_seed_row(rank, screening))
+
+
+def _site_finder_seed_screenings(
+    result: PortfolioScreeningResult,
+) -> tuple[SiteScreening, ...]:
+    by_key: dict[str, SiteScreening] = {}
+    for screening in result.ranked_sites:
+        if screening.deep_dive_recommendation not in {
+            "recommended",
+            "conditional",
+        }:
+            continue
+        candidate = screening.best_candidate
+        if candidate is None:
+            continue
+        key = _site_finder_seed_key(candidate)
+        previous = by_key.get(key)
+        if previous is None or _seed_sort_key(screening) < _seed_sort_key(previous):
+            by_key[key] = screening
+    return tuple(sorted(by_key.values(), key=_seed_sort_key))
+
+
+def _site_finder_seed_key(candidate: CandidateScreening) -> str:
+    identity = candidate.identity
+    if identity is not None:
+        if identity.rte7000_id:
+            return f"rte7000:{identity.rte7000_id}"
+        if identity.odre_code:
+            return f"odre:{identity.odre_code}"
+        return f"cartostock:{identity.cartostock_id}"
+    return f"osm:{candidate.substation.osm_type}:{candidate.substation.osm_id}"
+
+
+def _seed_sort_key(screening: SiteScreening) -> tuple[int, int, int, str]:
+    recommendation_rank = {
+        "recommended": 0,
+        "conditional": 1,
+        "not_recommended": 2,
+    }[screening.deep_dive_recommendation]
+    class_rank = {"A": 0, "B": 1, "C": 2, "D": 3}[screening.opportunity_class]
+    return (
+        recommendation_rank,
+        class_rank,
+        -screening.total_score,
+        screening.site.client_site_id,
+    )
+
+
+def _site_finder_seed_row(rank: int, screening: SiteScreening) -> dict[str, object]:
+    candidate = screening.best_candidate
+    assert candidate is not None
+    identity = candidate.identity
+    profile = candidate.public_evidence
+    dimensions = {dimension.name: dimension.points for dimension in screening.dimensions}
+    voltage = _candidate_voltage(candidate)
+    return {
+        "seed_rank": rank,
+        "source_client_site_id": screening.site.client_site_id,
+        "candidate_name": candidate.substation.name or "",
+        "region": "" if profile is None else profile.region,
+        "odre_code": (
+            "" if identity is None or identity.odre_code is None else identity.odre_code
+        ),
+        "rte7000_id": (
+            ""
+            if identity is None or identity.rte7000_id is None
+            else identity.rte7000_id
+        ),
+        "cartostock_id": "" if identity is None else identity.cartostock_id,
+        "voltage_kv": "" if voltage is None else f"{voltage:g}",
+        "source_site_distance_km": f"{candidate.substation.distance_km:.2f}",
+        "opportunity_class": screening.opportunity_class,
+        "deep_dive_recommendation": screening.deep_dive_recommendation,
+        "total_score": screening.total_score,
+        "public_grid_evidence_score": dimensions.get("public_grid_evidence", 0),
+        "source_completeness_score": (
+            "" if profile is None else profile.source_completeness_score
+        ),
+        "regional_constraint_count": (
+            "" if profile is None else profile.regional_constraint_count
+        ),
+        "battery_storage_kw_region": (
+            "" if profile is None else profile.battery_storage_kw_region
+        ),
+        "battery_storage_kw_source_substation": (
+            "" if profile is None else profile.battery_storage_kw_source_substation
+        ),
+        "latest_regional_load_date": (
+            "" if profile is None else profile.latest_regional_load_date
+        ),
+        "seed_use": "site_finder_reference_substation",
+    }
+
+
+def _bundle_summary(result: PortfolioScreeningResult) -> dict[str, object]:
+    shortlist = [
+        screening
+        for screening in result.ranked_sites
+        if screening.deep_dive_recommendation in {"recommended", "conditional"}
+    ]
+    return {
+        "package_type": "portfolio_screening_bundle_summary",
+        "validation_depth": "geospatial_screening",
+        "policy_version": result.policy_version,
+        "site_count": len(result.ranked_sites),
+        "candidate_count": len(result.candidate_assessments),
+        "source_error_count": len(result.source_errors),
+        "source_errors": dict(result.source_errors),
+        "opportunity_class_counts": _count_values(
+            (screening.opportunity_class for screening in result.ranked_sites),
+            ("A", "B", "C", "D"),
+        ),
+        "deep_dive_recommendation_counts": _count_values(
+            (
+                screening.deep_dive_recommendation
+                for screening in result.ranked_sites
+            ),
+            ("recommended", "conditional", "not_recommended"),
+        ),
+        "deep_dive_shortlist_count": len(shortlist),
+        "deep_dive_shortlist_site_ids": [
+            screening.site.client_site_id for screening in shortlist
+        ],
+        "site_finder_seed_count": len(_site_finder_seed_screenings(result)),
+        "top_ranked_site": (
+            None if not result.ranked_sites else _summary_site(result.ranked_sites[0])
+        ),
+    }
+
+
+def _count_values(values: Iterable[str], expected: tuple[str, ...]) -> dict[str, int]:
+    counts = dict.fromkeys(expected, 0)
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _summary_site(screening: SiteScreening) -> dict[str, object]:
+    candidate = screening.best_candidate
+    identity = None if candidate is None else candidate.identity
+    return {
+        "portfolio_rank": screening.portfolio_rank,
+        "client_site_id": screening.site.client_site_id,
+        "opportunity_class": screening.opportunity_class,
+        "recommendation": screening.recommendation,
+        "deep_dive_recommendation": screening.deep_dive_recommendation,
+        "total_score": screening.total_score,
+        "candidate_name": "" if candidate is None else candidate.substation.name or "",
+        "candidate_distance_km": (
+            None if candidate is None else round(candidate.substation.distance_km, 6)
+        ),
+        "candidate_rte7000_id": (
+            ""
+            if identity is None or identity.rte7000_id is None
+            else identity.rte7000_id
+        ),
+    }
+
+
+def _deep_dive_input_package(
+    screening: SiteScreening, policy_version: str
+) -> dict[str, object]:
+    return {
+        "package_type": "deep_dive_site_input",
+        "validation_depth": "geospatial_screening",
+        "policy_version": policy_version,
+        "client_site_id": screening.site.client_site_id,
+        "screening": {
+            "portfolio_rank": screening.portfolio_rank,
+            "opportunity_class": screening.opportunity_class,
+            "recommendation": screening.recommendation,
+            "deep_dive_recommendation": screening.deep_dive_recommendation,
+            "evidence_confidence": screening.evidence_confidence,
+            "total_score": screening.total_score,
+            "next_action": screening.next_action,
+        },
+        "site": _json_value(screening.site),
+        "candidate": _candidate_deep_dive_package(screening.best_candidate),
+        "score_dimensions": _json_value(screening.dimensions),
+        "strongest_positive_signals": list(screening.strongest_positive_signals),
+        "likely_constraints": list(screening.likely_constraints),
+        "missing_evidence": list(screening.missing_evidence),
+        "public_grid_evidence": _json_value(
+            None
+            if screening.best_candidate is None
+            else screening.best_candidate.public_evidence
+        ),
+        "manual_validation_checklist": [
+            "Confirm canonical RTE/Enedis node and voltage level.",
+            "Confirm bay availability and feasible physical route.",
+            "Map RTE7000 id to the power-flow bus before simulation.",
+            "Replace public signals with operator or client-validated data before investment memo.",
+        ],
+        "prohibited_claims": [
+            "guaranteed_connection_capacity",
+            "official_connection_feasibility",
+            "reserved_grid_capacity",
+            "operator_validated_cost_or_delay",
+        ],
+    }
+
+
+def _candidate_deep_dive_package(
+    candidate: CandidateScreening | None,
+) -> dict[str, object] | None:
+    if candidate is None:
+        return None
+    identity = candidate.identity
+    cartostock = candidate.cartostock
+    return {
+        "name": candidate.substation.name or "",
+        "distance_km": round(candidate.substation.distance_km, 6),
+        "voltage_kv": _candidate_voltage(candidate),
+        "osm_type": candidate.substation.osm_type,
+        "osm_id": candidate.substation.osm_id,
+        "osm_reference": candidate.substation.reference or "",
+        "osm_source_url": candidate.substation.source_url,
+        "match_confidence": candidate.match_confidence,
+        "match_method": candidate.match_method,
+        "cartostock_id": "" if identity is None else identity.cartostock_id,
+        "odre_code": (
+            "" if identity is None or identity.odre_code is None else identity.odre_code
+        ),
+        "rte7000_id": (
+            ""
+            if identity is None or identity.rte7000_id is None
+            else identity.rte7000_id
+        ),
+        "cartostock_gabarit": "" if cartostock is None else cartostock.gabarit or "",
+        "cartostock_gabarit_substation_capacity": (
+            "" if cartostock is None else cartostock.gabarit_substation_capacity or ""
+        ),
+        "cartostock_gabarit_zone_capacity": (
+            "" if cartostock is None else cartostock.gabarit_zone_capacity or ""
+        ),
+    }
+
+
+def _safe_filename(value: str) -> str:
+    filename = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._")
+    return filename or "site"
+
+
 def _render_report(result: PortfolioScreeningResult) -> str:
     lines = [
         "# VoltPath - Portfolio Screening",
@@ -268,6 +727,42 @@ def _render_report(result: PortfolioScreeningResult) -> str:
             f"{screening.recommendation} | {name} | {distance} | "
             f"{screening.evidence_confidence} |"
         )
+
+    lines.extend(["", "## Recommended Deep Dive Shortlist", ""])
+    shortlist = tuple(
+        screening
+        for screening in result.ranked_sites
+        if screening.deep_dive_recommendation in {"recommended", "conditional"}
+    )
+    if not shortlist:
+        lines.append("No site currently justifies Deep Dive scoping.")
+    else:
+        lines.extend(
+            [
+                "| Rang | Site | Deep Dive | Classe | Score | Prochaine action |",
+                "|---:|---|---|:---:|---:|---|",
+            ]
+        )
+        for screening in shortlist:
+            lines.append(
+                f"| {screening.portfolio_rank} | {screening.site.client_site_id} | "
+                f"{screening.deep_dive_recommendation} | {screening.opportunity_class} | "
+                f"{screening.total_score} | {screening.next_action} |"
+            )
+
+    lines.extend(
+        [
+            "",
+            "## Public Evidence Boundary",
+            "",
+            (
+                "ODRE and ECO2MIX are public-context evidence. They improve screening "
+                "explainability but do not provide nodal measurements, reserved capacity, "
+                "or official connection feasibility."
+            ),
+            "",
+        ]
+    )
 
     lines.extend(["", "## Détail des sites", ""])
     for screening in result.ranked_sites:
@@ -318,6 +813,7 @@ def _site_report_lines(screening: SiteScreening) -> list[str]:
         f"- Signaux positifs : {positives}",
         f"- Contraintes probables : {constraints}",
         f"- Preuves manquantes : {missing}",
+        f"- Recommandation Deep Dive : {screening.deep_dive_recommendation}",
         f"- Prochaine action : {screening.next_action}",
         "",
     ]

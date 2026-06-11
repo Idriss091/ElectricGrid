@@ -8,6 +8,7 @@ from thesegrid.osm_substations import OsmSourceManifest, OsmSubstation
 from thesegrid.portfolio_input import PortfolioSite
 from thesegrid.portfolio_reporting import write_portfolio_screening_outputs
 from thesegrid.portfolio_screening import screen_portfolio
+from thesegrid.public_data.evidence import PublicGridEvidenceProfile
 from thesegrid.substation_identity import (
     CartostockSubstation,
     FrenchSubstationIdentity,
@@ -80,10 +81,27 @@ def _screening_result():
         gabarit_zone_name="Alpha",
         gabarit_zone_capacity="55 MW",
     )
+    public_evidence = PublicGridEvidenceProfile(
+        client_site_id="SITE-CLIENT-01",
+        region="BRETAGNE",
+        odre_code=".ALPH",
+        regional_constraint_count=2,
+        dominant_constraint_occurrence="Forte : entre 75 et 150 fois par an",
+        dominant_constraint_duration="]2h-4h]",
+        high_persistence_constraint_count=1,
+        battery_storage_kw_region=1500.0,
+        battery_storage_kwh_region=3000.0,
+        battery_storage_kw_source_substation=1200.0,
+        latest_regional_load_date="2026-06-09",
+        eco2mix_coverage_hours=35136,
+        source_completeness_score=1.0,
+        missing_evidence=(),
+    )
     return screen_portfolio(
         (site,),
         {"SITE-CLIENT-01": (link,)},
         (cartostock,),
+        public_evidence_profiles=(public_evidence,),
     )
 
 
@@ -109,6 +127,11 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
 
     assert outputs.ranked_csv_path.exists()
     assert outputs.candidates_csv_path.exists()
+    assert outputs.public_grid_evidence_csv_path.exists()
+    assert outputs.deep_dive_shortlist_csv_path.exists()
+    assert outputs.deep_dive_inputs_dir_path.is_dir()
+    assert outputs.site_finder_seed_signals_csv_path.exists()
+    assert outputs.bundle_summary_path.exists()
     assert outputs.report_path.exists()
     assert outputs.map_path.exists()
     assert outputs.assumption_register_path.exists()
@@ -120,7 +143,70 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     assert rows[0]["opportunity_class"] == "A"
     assert rows[0]["recommendation"] == "prioritize"
     assert rows[0]["candidate_rte7000_id"] == ".ALPH"
+    assert rows[0]["public_grid_evidence_score"] == "10"
+    assert rows[0]["deep_dive_recommendation"] == "recommended"
     assert rows[0]["validation_depth"] == "geospatial_screening"
+
+    with outputs.public_grid_evidence_csv_path.open(newline="", encoding="utf-8") as handle:
+        evidence_rows = list(csv.DictReader(handle))
+    assert evidence_rows[0]["client_site_id"] == "SITE-CLIENT-01"
+    assert evidence_rows[0]["region"] == "BRETAGNE"
+    assert evidence_rows[0]["battery_storage_kw_region"] == "1500.0"
+
+    with outputs.deep_dive_shortlist_csv_path.open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        shortlist_rows = list(csv.DictReader(handle))
+    assert len(shortlist_rows) == 1
+    assert shortlist_rows[0]["client_site_id"] == "SITE-CLIENT-01"
+    assert shortlist_rows[0]["deep_dive_recommendation"] == "recommended"
+    assert shortlist_rows[0]["candidate_rte7000_id"] == ".ALPH"
+    assert shortlist_rows[0]["public_grid_evidence_score"] == "10"
+    assert shortlist_rows[0]["source_completeness_score"] == "1.0"
+
+    deep_dive_package_path = (
+        outputs.deep_dive_inputs_dir_path / "SITE-CLIENT-01.json"
+    )
+    assert deep_dive_package_path.exists()
+    deep_dive_package = json.loads(deep_dive_package_path.read_text(encoding="utf-8"))
+    assert deep_dive_package["package_type"] == "deep_dive_site_input"
+    assert deep_dive_package["client_site_id"] == "SITE-CLIENT-01"
+    assert deep_dive_package["screening"]["deep_dive_recommendation"] == "recommended"
+    assert deep_dive_package["site"]["requested_mw"] == 50.0
+    assert deep_dive_package["candidate"]["rte7000_id"] == ".ALPH"
+    assert deep_dive_package["candidate"]["odre_code"] == ".ALPH"
+    assert deep_dive_package["public_grid_evidence"]["region"] == "BRETAGNE"
+    assert "Map RTE7000 id to the power-flow bus before simulation." in (
+        deep_dive_package["manual_validation_checklist"]
+    )
+    assert "official_connection_feasibility" in deep_dive_package["prohibited_claims"]
+
+    with outputs.site_finder_seed_signals_csv_path.open(
+        newline="", encoding="utf-8"
+    ) as handle:
+        seed_rows = list(csv.DictReader(handle))
+    assert len(seed_rows) == 1
+    assert seed_rows[0]["source_client_site_id"] == "SITE-CLIENT-01"
+    assert seed_rows[0]["candidate_name"] == "Alpha"
+    assert seed_rows[0]["odre_code"] == ".ALPH"
+    assert seed_rows[0]["rte7000_id"] == ".ALPH"
+    assert seed_rows[0]["region"] == "BRETAGNE"
+    assert seed_rows[0]["seed_use"] == "site_finder_reference_substation"
+
+    bundle_summary = json.loads(outputs.bundle_summary_path.read_text(encoding="utf-8"))
+    assert bundle_summary["package_type"] == "portfolio_screening_bundle_summary"
+    assert bundle_summary["site_count"] == 1
+    assert bundle_summary["candidate_count"] == 1
+    assert bundle_summary["site_finder_seed_count"] == 1
+    assert bundle_summary["opportunity_class_counts"] == {
+        "A": 1,
+        "B": 0,
+        "C": 0,
+        "D": 0,
+    }
+    assert bundle_summary["deep_dive_recommendation_counts"]["recommended"] == 1
+    assert bundle_summary["deep_dive_shortlist_count"] == 1
+    assert bundle_summary["top_ranked_site"]["client_site_id"] == "SITE-CLIENT-01"
 
     with outputs.candidates_csv_path.open(newline="", encoding="utf-8") as handle:
         candidate_rows = list(csv.DictReader(handle))
@@ -131,6 +217,8 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     report = outputs.report_path.read_text(encoding="utf-8")
     assert "# VoltPath - Portfolio Screening" in report
     assert "SITE-CLIENT-01" in report
+    assert "Recommended Deep Dive Shortlist" in report
+    assert "ODRE and ECO2MIX are public-context evidence" in report
     assert "pré-faisabilité côté acheteur" in report
     assert "ne remplace pas une étude officielle" in report
 
@@ -153,3 +241,10 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     assert manifest["site_count"] == 1
     assert manifest["candidate_count"] == 1
     assert manifest["source_manifests"][0]["client_site_id"] == "SITE-CLIENT-01"
+    assert manifest["outputs"]["deep_dive_shortlist"] == "deep_dive_shortlist.csv"
+    assert manifest["outputs"]["deep_dive_inputs"] == "deep_dive_inputs"
+    assert (
+        manifest["outputs"]["site_finder_seed_signals"]
+        == "site_finder_seed_signals.csv"
+    )
+    assert manifest["outputs"]["bundle_summary"] == "portfolio_bundle_summary.json"

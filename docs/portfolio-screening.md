@@ -45,7 +45,11 @@ PYTHONPATH=src python -m thesegrid.cli portfolio-screen \
   --rte7000-year 2023 \
   --rte7000-month 1 \
   --rte7000-snapshot 2023-01-01T00:00:00 \
-  --search-radius-km 50
+  --search-radius-km 50 \
+  --odre-constraints ODRE/contraintes-region.csv \
+  --odre-storage-assets ODRE/registre-national-installation-production-stockage-electricite-agrege.csv \
+  --odre-regional-loads ODRE/soutirages-regionaux-quotidiens-provisoires-rpt.csv \
+  --eco2mix-annual ECO2MIX/eCO2mix_RTE_Annuel-Definitif_2024.xls
 ```
 
 The RTE7000 reader requests only:
@@ -72,10 +76,32 @@ PYTHONPATH=src python -m thesegrid.cli portfolio-screen \
 ODRE and the projected RTE7000 snapshot remain live remote sources. The OSM fixture is
 hashed and recorded in the run manifest.
 
+Local ODRE and ECO2MIX paths are optional. When provided, they enrich the ranking with
+public-context evidence:
+
+- regional constraint count, duration, occurrence, and persistence;
+- BESS/storage density by region and matched source substation;
+- latest available regional withdrawal date;
+- national ECO2MIX system-context coverage.
+
+These signals improve prioritization and Deep Dive shortlisting. They are not nodal
+measurements, reserved capacity, or official connection feasibility.
+
 ## Outputs
 
 - `portfolio_ranked.csv`: one commercial decision row per client site;
 - `candidate_substations.csv`: full candidate and identity audit trail;
+- `public_grid_evidence.csv`: ODRE/ECO2MIX-derived public-context evidence per linked
+  site/candidate profile;
+- `deep_dive_shortlist.csv`: directly actionable list of sites recommended or
+  conditionally recommended for Deep Dive scoping;
+- `deep_dive_inputs/`: one JSON preparation package per shortlisted site, including
+  site demand, candidate substation identifiers, public evidence, score rationale,
+  manual validation checklist, and prohibited claims;
+- `site_finder_seed_signals.csv`: deduplicated reference-substation signals from
+  shortlisted sites for a later Site Finder workflow;
+- `portfolio_bundle_summary.json`: machine-readable run summary with class counts,
+  Deep Dive counts, source-error count, and top-ranked site;
 - `portfolio_screening_report.md`: executive shortlist and detailed rationale;
 - `portfolio_screening_map.html`: standalone relative-location map;
 - `source_assumption_register.json`: source roles, assumptions, and prohibited claims;
@@ -90,6 +116,20 @@ hashed and recorded in the run manifest.
 
 Class A requires both a deterministic canonical identity and an RTE7000 topology link.
 No numerical score is a probability of successful connection.
+
+`deep_dive_recommendation` is a shortlist trigger:
+
+- `recommended`: Class A candidate with substantial public evidence coverage;
+- `conditional`: promising candidate that still needs manual source or identity review;
+- `not_recommended`: weak, rejected, or insufficiently evidenced candidate.
+
+Files under `deep_dive_inputs/` are handoff packages for a later Deep Dive workflow.
+They preserve the screening evidence and manual validation checklist but do not contain
+power-flow results, hosting capacity, curtailment estimates, or a connection verdict.
+
+`site_finder_seed_signals.csv` is a preparation artifact only. It identifies public
+reference-substation signals worth reusing in a future Site Finder workflow; it does not
+generate prospecting zones, land parcels, or new site recommendations.
 
 ## Known Boundaries
 

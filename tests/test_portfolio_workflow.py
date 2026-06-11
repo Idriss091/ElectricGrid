@@ -46,6 +46,39 @@ def _write_cartostock(path):
     )
 
 
+def _write_public_evidence_sources(tmp_path):
+    constraints = tmp_path / "contraintes-region.csv"
+    storage = tmp_path / "registre.csv"
+    eco2mix = tmp_path / "eco2mix.xls"
+    regional_loads = tmp_path / "soutirages-regionaux.csv"
+    constraints.write_text(
+        "\ufeffRégion,Ouvrage,Nom de l'ouvrage,Puissance max de l'ouvrage,"
+        "Poste 1,Pourcentage 1,Occurrence,Durée,Pérennité,Specificité\n"
+        "BRETAGNE,ABC,LIAISON ABC,50.0,.ALPH,-40.0,"
+        "Forte : entre 75 et 150 fois par an,]2h-4h],ELEVEE,Contrainte en journée\n",
+        encoding="utf-8",
+    )
+    storage.write_text(
+        "region,posteSource,filiere,typeStockage,tensionRaccordement,puisMaxInstallee,"
+        "puisMaxCharge,puisMaxInstalleeDisCharge,energieStockable,nbInstallations\n"
+        "BRETAGNE,.ALPH,Stockage non hydraulique,BATTE,HTA,1200,1000,1000,2400,1\n",
+        encoding="utf-8",
+    )
+    eco2mix.write_text(
+        "Périmètre\tNature\tDate\tHeures\tConsommation\tSolaire\tEolien\t"
+        " Stockage batterie\tDéstockage batterie\n"
+        "Données définitives\t2024-01-01\t00:00\t55000\t54200\t0\t15557\t0\t14976\n",
+        encoding="latin1",
+    )
+    regional_loads.write_text(
+        "Date,Code INSEE région,Région,Secteur activité,Code tension raccordement,"
+        "Tension raccordement,00h00,00h30,Nb points de soutirage,Energie journalière (MWh),Qualité\n"
+        "2026-06-09,53,BRETAGNE,Grande Industrie,6,225 kV,10.5,11.5,2,22.0,Provisoire\n",
+        encoding="utf-8",
+    )
+    return constraints, storage, eco2mix, regional_loads
+
+
 def _odre_result():
     return OdreSubstationResult(
         substations=(
@@ -157,6 +190,40 @@ def test_run_portfolio_workflow_uses_projected_pinned_rte_snapshot_and_writes_bu
     assert result.screening.ranked_sites[0].opportunity_class == "A"
     assert result.outputs.report_path.exists()
     assert result.outputs.manifest_path.exists()
+
+
+def test_run_portfolio_workflow_enriches_ranking_with_local_public_evidence(tmp_path):
+    portfolio_path = tmp_path / "portfolio.csv"
+    cartostock_path = tmp_path / "cartostock.csv"
+    output_dir = tmp_path / "output"
+    _write_portfolio(portfolio_path)
+    _write_cartostock(cartostock_path)
+    constraints, storage, eco2mix, regional_loads = _write_public_evidence_sources(tmp_path)
+
+    result = run_portfolio_workflow(
+        PortfolioWorkflowRequest(
+            portfolio_path=portfolio_path,
+            cartostock_path=cartostock_path,
+            output_dir=output_dir,
+            rte7000_revision="1a2419a6f8a81ab212af035e811d4b893d7c4ccf",
+            odre_constraints_path=constraints,
+            odre_storage_assets_path=storage,
+            odre_regional_loads_path=regional_loads,
+            eco2mix_annual_path=eco2mix,
+        ),
+        odre_loader=_odre_result,
+        rte_reader=_rte_result,
+        osm_discoverer=_osm_result,
+    )
+
+    candidate = result.screening.ranked_sites[0].best_candidate
+    assert candidate is not None
+    assert candidate.public_evidence is not None
+    assert candidate.public_evidence.region == "BRETAGNE"
+    assert candidate.public_evidence.latest_regional_load_date == "2026-06-09"
+    assert candidate.public_evidence.missing_evidence == ()
+    assert result.screening.ranked_sites[0].deep_dive_recommendation == "recommended"
+    assert result.outputs.public_grid_evidence_csv_path.exists()
 
 
 def test_run_portfolio_workflow_keeps_site_visible_when_osm_source_fails(tmp_path):

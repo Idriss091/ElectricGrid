@@ -7,6 +7,7 @@ from typing import Literal
 
 from thesegrid.osm_substations import OsmSubstation
 from thesegrid.portfolio_input import PortfolioSite
+from thesegrid.public_data.evidence import PublicGridEvidenceProfile
 from thesegrid.substation_identity import (
     CartostockSubstation,
     FrenchSubstationIdentity,
@@ -21,6 +22,7 @@ PORTFOLIO_SCREENING_POLICY_VERSION = "portfolio-geospatial-v0"
 OpportunityClass = Literal["A", "B", "C", "D"]
 Recommendation = Literal["prioritize", "investigate", "hold", "reject"]
 EvidenceConfidence = Literal["high", "medium", "low", "unavailable"]
+DeepDiveRecommendation = Literal["recommended", "conditional", "not_recommended"]
 
 
 @dataclass(frozen=True)
@@ -42,6 +44,7 @@ class CandidateScreening:
     within_client_distance: bool
     total_score: int
     dimensions: tuple[ScoreDimension, ...]
+    public_evidence: PublicGridEvidenceProfile | None = None
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,7 @@ class SiteScreening:
     likely_constraints: tuple[str, ...]
     missing_evidence: tuple[str, ...]
     next_action: str
+    deep_dive_recommendation: DeepDiveRecommendation = "not_recommended"
 
 
 @dataclass(frozen=True)
@@ -74,17 +78,22 @@ def screen_portfolio(
     cartostock_substations: Iterable[CartostockSubstation],
     *,
     source_errors: Mapping[str, str] | None = None,
+    public_evidence_profiles: Iterable[PublicGridEvidenceProfile] = (),
 ) -> PortfolioScreeningResult:
     cartostock_by_id = {
         record.cartostock_id: record for record in cartostock_substations
     }
     errors = dict(source_errors or {})
+    public_evidence_by_key = {
+        (profile.client_site_id, profile.odre_code): profile
+        for profile in public_evidence_profiles
+    }
     unsorted_sites: list[SiteScreening] = []
     all_candidates: list[CandidateScreening] = []
 
     for site in sites:
         candidates = tuple(
-            _score_candidate(site, link, cartostock_by_id)
+            _score_candidate(site, link, cartostock_by_id, public_evidence_by_key)
             for link in links_by_site.get(site.client_site_id, ())
         )
         all_candidates.extend(candidates)
@@ -145,6 +154,7 @@ def _score_candidate(
     site: PortfolioSite,
     link: OsmSubstationIdentityLink,
     cartostock_by_id: Mapping[str, CartostockSubstation],
+    public_evidence_by_key: Mapping[tuple[str, str], PublicGridEvidenceProfile],
 ) -> CandidateScreening:
     identity = link.identity
     cartostock = (
@@ -154,6 +164,7 @@ def _score_candidate(
         site.max_connection_distance_km is None
         or link.substation.distance_km <= site.max_connection_distance_km
     )
+    public_evidence = _public_evidence_for_candidate(site, identity, public_evidence_by_key)
     dimensions = (
         _practicality_dimension(site, link.substation, within_distance),
         _evidence_dimension(link),
@@ -161,6 +172,8 @@ def _score_candidate(
         _flexible_signal_dimension(site, cartostock),
         _public_completeness_dimension(cartostock),
         _readiness_dimension(site),
+    ) + (
+        () if public_evidence is None else (_public_grid_evidence_dimension(public_evidence),)
     )
     return CandidateScreening(
         client_site_id=site.client_site_id,
@@ -172,6 +185,7 @@ def _score_candidate(
         within_client_distance=within_distance,
         total_score=sum(dimension.points for dimension in dimensions),
         dimensions=dimensions,
+        public_evidence=public_evidence,
     )
 
 
@@ -218,6 +232,7 @@ def _build_site_screening(
         likely_constraints=constraints,
         missing_evidence=missing_evidence,
         next_action=_next_action(opportunity_class),
+        deep_dive_recommendation=_deep_dive_recommendation(opportunity_class, candidate),
     )
 
 
@@ -393,6 +408,37 @@ def _readiness_dimension(site: PortfolioSite) -> ScoreDimension:
     )
 
 
+def _public_evidence_for_candidate(
+    site: PortfolioSite,
+    identity: FrenchSubstationIdentity | None,
+    public_evidence_by_key: Mapping[tuple[str, str], PublicGridEvidenceProfile],
+) -> PublicGridEvidenceProfile | None:
+    if identity is None or identity.odre_code is None:
+        return None
+    return public_evidence_by_key.get((site.client_site_id, identity.odre_code))
+
+
+def _public_grid_evidence_dimension(profile: PublicGridEvidenceProfile) -> ScoreDimension:
+    if profile.missing_evidence:
+        completeness_points = int(round(profile.source_completeness_score * 6))
+        reason = (
+            "ODRE/ECO2MIX public evidence is partial; missing "
+            + ", ".join(profile.missing_evidence)
+            + "."
+        )
+    else:
+        completeness_points = 6
+        reason = "ODRE/ECO2MIX public evidence is complete for this screening profile."
+    storage_points = 2 if profile.battery_storage_kw_region > 0 else 0
+    substation_points = 2 if profile.battery_storage_kw_source_substation > 0 else 0
+    return ScoreDimension(
+        "public_grid_evidence",
+        min(10, completeness_points + storage_points + substation_points),
+        10,
+        reason,
+    )
+
+
 def _empty_dimensions(site: PortfolioSite) -> tuple[ScoreDimension, ...]:
     return (
         ScoreDimension("connection_practicality", 0, 30, "No candidate substation."),
@@ -513,6 +559,22 @@ def _next_action(opportunity_class: OpportunityClass) -> str:
         "C": "Hold pending stronger grid or development-readiness evidence.",
         "D": "Reject from the current shortlist or revise the search-distance assumption.",
     }[opportunity_class]
+
+
+def _deep_dive_recommendation(
+    opportunity_class: OpportunityClass,
+    candidate: CandidateScreening | None,
+) -> DeepDiveRecommendation:
+    if opportunity_class == "A" and candidate is not None:
+        if (
+            candidate.public_evidence is not None
+            and candidate.public_evidence.source_completeness_score >= 0.75
+        ):
+            return "recommended"
+        return "conditional"
+    if opportunity_class == "B":
+        return "conditional"
+    return "not_recommended"
 
 
 def _extract_mw(value: str | None) -> float | None:

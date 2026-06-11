@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from thesegrid.osm_substations import OsmSubstation
 from thesegrid.portfolio_input import PortfolioSite
+from thesegrid.public_data.evidence import PublicGridEvidenceProfile
 from thesegrid.portfolio_screening import (
     PORTFOLIO_SCREENING_POLICY_VERSION,
     screen_portfolio,
@@ -128,6 +129,44 @@ def test_screen_portfolio_emits_six_explainable_dimensions_and_class_a_gate():
     assert screened.best_candidate is not None
     assert screened.best_candidate.identity is not None
     assert screened.next_action.startswith("Launch Deep Dive")
+
+
+def test_screen_portfolio_uses_public_grid_evidence_for_score_and_deep_dive_trigger():
+    site = _site("SITE-PUBLIC")
+    public_evidence = PublicGridEvidenceProfile(
+        client_site_id="SITE-PUBLIC",
+        region="BRETAGNE",
+        odre_code=".ALPH",
+        regional_constraint_count=2,
+        dominant_constraint_occurrence="Forte : entre 75 et 150 fois par an",
+        dominant_constraint_duration="]2h-4h]",
+        high_persistence_constraint_count=1,
+        battery_storage_kw_region=1500.0,
+        battery_storage_kwh_region=3000.0,
+        battery_storage_kw_source_substation=1200.0,
+        latest_regional_load_date="2026-06-09",
+        eco2mix_coverage_hours=35136,
+        source_completeness_score=1.0,
+        missing_evidence=(),
+    )
+
+    result = screen_portfolio(
+        (site,),
+        {"SITE-PUBLIC": (_link(),)},
+        (_cartostock(),),
+        public_evidence_profiles=(public_evidence,),
+    )
+
+    screened = result.ranked_sites[0]
+    assert screened.best_candidate is not None
+    assert screened.best_candidate.public_evidence == public_evidence
+    assert [dimension.name for dimension in screened.dimensions][-1] == "public_grid_evidence"
+    assert screened.dimensions[-1].points == 10
+    assert screened.deep_dive_recommendation == "recommended"
+    assert any(
+        "ODRE/ECO2MIX public evidence is complete" in signal
+        for signal in screened.strongest_positive_signals
+    )
 
 
 def test_screen_portfolio_requires_rte7000_link_for_class_a():

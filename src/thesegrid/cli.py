@@ -185,6 +185,26 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional JSON object of Overpass responses keyed by client_site_id",
     )
+    portfolio_screen.add_argument(
+        "--odre-constraints",
+        type=Path,
+        help="Optional local ODRE contraintes-region.csv for public evidence scoring",
+    )
+    portfolio_screen.add_argument(
+        "--odre-storage-assets",
+        type=Path,
+        help="Optional local ODRE production/storage registry CSV for public evidence scoring",
+    )
+    portfolio_screen.add_argument(
+        "--odre-regional-loads",
+        type=Path,
+        help="Optional local ODRE regional withdrawals CSV for public evidence scoring",
+    )
+    portfolio_screen.add_argument(
+        "--eco2mix-annual",
+        type=Path,
+        help="Optional local ECO2MIX annual TSV export, even when named .xls",
+    )
     qsts = subparsers.add_parser("qsts", help="Validate top screened buses with QSTS")
     qsts.add_argument("--network", required=True, help="SimBench code; 'toy' is refused for QSTS")
     qsts.add_argument("--screening-csv", required=True, type=Path, help="Input screening.csv path")
@@ -660,6 +680,10 @@ def _portfolio_screen(args: argparse.Namespace) -> int:
                 rte7000_snapshot=args.rte7000_snapshot,
                 search_radius_km=args.search_radius_km,
                 osm_fixture_path=args.osm_fixture,
+                odre_constraints_path=args.odre_constraints,
+                odre_storage_assets_path=args.odre_storage_assets,
+                odre_regional_loads_path=args.odre_regional_loads,
+                eco2mix_annual_path=args.eco2mix_annual,
             )
         )
     except (OSError, RuntimeError, ValueError) as exc:
