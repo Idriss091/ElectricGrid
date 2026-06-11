@@ -76,7 +76,7 @@ Use `docs/decision-policy.md` for the current rule that separates `screening_onl
 
 ## France BESS Language
 
-Thesegrid uses RTE/CRE-inspired vocabulary for the France BESS wedge: PTF, gabarit
+VoltPath uses RTE/CRE-inspired vocabulary for the France BESS wedge: PTF, gabarit
 injection/soutirage, capacite d'accueil, zone contrainte, and offre optimisee. These
 terms are interpretive labels for buyer-side pre-feasibility. The generated memo is not
 a PTF, not an official RTE/Enedis offer, and not an official connection study.

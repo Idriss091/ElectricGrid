@@ -4,9 +4,11 @@ version = "0.1.0"
 description = "Pre-feasibility engine for flexible grid connections"
 requires-python = ">=3.10"
 dependencies = [
+    "huggingface_hub",
     "numpy",
     "pandas",
     "pandapower",
+    "pyarrow",
     "simbench",
 ]
 

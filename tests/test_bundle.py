@@ -25,14 +25,17 @@ def test_render_bundle_html_contains_tables_and_boundaries(tmp_path):
     html = render_bundle_html(bundle)
 
     assert "<!doctype html>" in html
-    assert "Thesegrid BESS Investor Evidence" in html
+    assert "VoltPath BESS Investor Evidence" in html
     assert "false_positive_stratified" in html
     assert "resize-recommended" in html
     assert "not an official grid-connection study" in html
-    assert "Benchmark Status" in html
-    assert "SimBench benchmark network" in html
-    assert "MVP Decision Policy" in html
-    assert "docs/mvp-decision-policy.md" in html
+    assert "Benchmark Status" not in html
+    assert "This bundle uses a SimBench benchmark network" not in html
+    assert "MVP Decision Policy" not in html
+    assert html.rfind("not an official grid-connection study") > html.find("Bundle Artifacts")
+    assert "Site Selection Funnel" in html
+    assert "Candidate Ranking" in html
+    assert "Why Conditions?" in html
 
 
 def test_render_bundle_html_uses_pipeline_manifest_context_and_decision_summary(tmp_path):
@@ -60,9 +63,6 @@ def test_render_bundle_html_uses_pipeline_manifest_context_and_decision_summary(
 
     assert "client_mv_feeder_a" in html
     assert "7 MW BESS" in html
-    assert "Client Evidence Boundary" in html
-    assert "client_model" in html
-    assert "qsts_full_year" in html
     assert "Decision Summary" in html
     assert "final_decision" in html
     assert "reject_or_resize_connection" in html
@@ -77,7 +77,7 @@ def test_render_bundle_html_includes_regulatory_assumption_traceability(tmp_path
     assert "rte_cre_inspired_v1_injection" in html
     assert "source_publication_date" in html
     assert "hypothesis_status" in html
-    assert "thesegrid_proxy_not_official" in html
+    assert "voltpath_proxy_not_official" in html
     assert "not a PTF" in html
 
 
@@ -106,6 +106,107 @@ def test_render_bundle_html_has_executive_summary_badges_and_artifact_links(tmp_
     assert "energy_tolerance" in html
     assert "bus24_2mw" in html
     assert "2.000000" in html
+
+
+def test_render_bundle_html_uses_qsts_results_when_validation_matrix_is_absent(tmp_path):
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    _write_csv(
+        bundle / "qsts_results.csv",
+        [
+            "bus_id",
+            "bus_name",
+            "qsts_verdict",
+            "product_decision",
+            "validation_level",
+            "decision_confidence",
+            "recommended_next_action",
+            "requested_mw",
+            "expected_curtailment_mwh",
+            "p90_curtailment_mw",
+        ],
+        [
+            {
+                "bus_id": "2",
+                "bus_name": "MV1.101 busbar1.1",
+                "qsts_verdict": "go-with-conditions",
+                "product_decision": "go-with-conditions",
+                "validation_level": "qsts_full_year",
+                "decision_confidence": "high",
+                "recommended_next_action": "proceed_with_conditions",
+                "requested_mw": "5.000000",
+                "expected_curtailment_mwh": "120.976562",
+                "p90_curtailment_mw": "0.000000",
+            },
+            {
+                "bus_id": "3",
+                "bus_name": "MV1.101 busbar1.2",
+                "qsts_verdict": "go-with-conditions",
+                "product_decision": "go-with-conditions",
+                "validation_level": "qsts_full_year",
+                "decision_confidence": "high",
+                "recommended_next_action": "proceed_with_conditions",
+                "requested_mw": "5.000000",
+                "expected_curtailment_mwh": "120.976562",
+                "p90_curtailment_mw": "0.000000",
+            },
+            {
+                "bus_id": "16",
+                "bus_name": "MV1.101 Bus 16",
+                "qsts_verdict": "go-with-conditions",
+                "product_decision": "go-with-conditions",
+                "validation_level": "qsts_full_year",
+                "decision_confidence": "high",
+                "recommended_next_action": "proceed_with_conditions",
+                "requested_mw": "5.000000",
+                "expected_curtailment_mwh": "115.546875",
+                "p90_curtailment_mw": "0.000000",
+            },
+        ],
+    )
+    _write_csv(
+        bundle / "qsts_risk_summary.csv",
+        [
+            "bus_id",
+            "bus_name",
+            "qsts_verdict",
+            "curtailment_hours",
+            "expected_curtailment_mwh",
+            "curtailment_p90_mw",
+            "max_event_hours",
+            "max_event_mwh",
+            "dominant_constraint",
+        ],
+        [
+            {
+                "bus_id": "16",
+                "bus_name": "MV1.101 Bus 16",
+                "qsts_verdict": "go-with-conditions",
+                "curtailment_hours": "47",
+                "expected_curtailment_mwh": "115.546875",
+                "curtailment_p90_mw": "0.000000",
+                "max_event_hours": "2",
+                "max_event_mwh": "7.890625",
+                "dominant_constraint": "new_candidate_violation: bus[15] bus.vm_pu.max=1.050: count=26",
+            }
+        ],
+    )
+    (bundle / "qsts_performance.json").write_text(
+        json.dumps({"total_full_year_runtime_seconds": 2121.8}),
+        encoding="utf-8",
+    )
+
+    html = render_bundle_html(bundle)
+
+    assert "3/3 buses" in html
+    assert "0 buses are no-go" in html
+    assert "go-with-conditions" in html
+    assert "MV1.101 Bus 16" in html
+    assert "Recommended candidate" in html
+    assert "Proceed with conditions" in html
+    assert "47 h" in html
+    assert "115.55 MWh" in html
+    assert "Limit export during rare high-voltage hours" in html
 
 
 def test_render_bundle_html_includes_proxy_economic_scenarios(tmp_path):
@@ -269,7 +370,7 @@ def test_render_bundle_html_includes_decision_frontier_for_full_year_rows(tmp_pa
     html = render_bundle_html(bundle)
 
     assert "Decision Frontier" in html
-    assert "Thesegrid policy assumptions" in html
+    assert "VoltPath policy assumptions" in html
     assert "policy_max_energy_ratio" in html
     assert "standard" in html
     assert "0.010000" in html

@@ -68,3 +68,24 @@ def test_frontier_rejects_when_event_risk_exceeds_policy():
         )
         == "no-go"
     )
+
+
+def test_standard_frontier_accepts_rare_moderate_event_as_conditions():
+    rows = decision_frontier_rows(
+        bus_id=16,
+        bus_name="MV bus 16",
+        requested_mw=5.0,
+        qsts_p90_mw=0.0,
+        weighted_curtailment_mwh=115.546875,
+        curtailment_energy_ratio=115.546875 / (5.0 * 8760.0),
+        max_event_hours=2,
+        max_event_mwh=7.890625,
+        validation_level="qsts_full_year",
+    )
+
+    standard = next(row for row in rows if row.policy == "standard")
+
+    assert standard.max_event_mwh_per_mw == 1.578125
+    assert standard.policy_definition.max_event_mwh_per_mw == 1.0
+    assert standard.policy_definition.conditional_max_event_mwh_per_mw == 2.0
+    assert standard.frontier_verdict == "go-with-conditions"

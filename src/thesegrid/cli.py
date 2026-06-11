@@ -28,6 +28,7 @@ from thesegrid.full_year_selection import (
 from thesegrid.memo import write_investment_memo
 from thesegrid.models import ConnectionRequest, EconomicAssumptions
 from thesegrid.pipeline import PipelineRequest, run_pipeline
+from thesegrid.portfolio_workflow import PortfolioWorkflowRequest, run_portfolio_workflow
 from thesegrid.qsts import QstsRequest, run_qsts, write_qsts_outputs
 from thesegrid.resize import ResizeRequest, run_resize_scenarios, write_resize_outputs
 from thesegrid.screening import ScreeningRequest, screen_connections, write_screening_outputs
@@ -52,6 +53,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _assess(args)
     if args.command == "screen":
         return _screen(args)
+    if args.command == "portfolio-screen":
+        return _portfolio_screen(args)
     if args.command == "qsts":
         return _qsts(args)
     if args.command == "qsts-benchmark":
@@ -137,6 +140,51 @@ def _build_parser() -> argparse.ArgumentParser:
     screen.add_argument("--gross-margin-eur-per-mwh", type=float, default=0.0)
     screen.add_argument("--curtailment-penalty-eur-per-mwh", type=float, default=100.0)
     screen.add_argument("--waiting-cost-eur-per-mw-year", type=float, default=50_000.0)
+    portfolio_screen = subparsers.add_parser(
+        "portfolio-screen",
+        help="Rank a client BESS portfolio using French public grid evidence",
+    )
+    portfolio_screen.add_argument(
+        "--portfolio",
+        required=True,
+        type=Path,
+        help="Client portfolio CSV",
+    )
+    portfolio_screen.add_argument(
+        "--cartostock",
+        required=True,
+        type=Path,
+        help="Cartostock semicolon-delimited CSV",
+    )
+    portfolio_screen.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Client bundle output directory",
+    )
+    portfolio_screen.add_argument(
+        "--rte7000-revision",
+        required=True,
+        help="Immutable OpenSynth/rte7000 Git commit SHA",
+    )
+    portfolio_screen.add_argument("--rte7000-year", type=int, default=2023)
+    portfolio_screen.add_argument("--rte7000-month", type=int, default=1)
+    portfolio_screen.add_argument(
+        "--rte7000-snapshot",
+        default="2023-01-01T00:00:00",
+        help="ISO-8601 timestamp used for the projected RTE7000 substation snapshot",
+    )
+    portfolio_screen.add_argument(
+        "--search-radius-km",
+        type=float,
+        default=50.0,
+        help="Bounded OSM substation search radius from 1 to 100 km",
+    )
+    portfolio_screen.add_argument(
+        "--osm-fixture",
+        type=Path,
+        help="Optional JSON object of Overpass responses keyed by client_site_id",
+    )
     qsts = subparsers.add_parser("qsts", help="Validate top screened buses with QSTS")
     qsts.add_argument("--network", required=True, help="SimBench code; 'toy' is refused for QSTS")
     qsts.add_argument("--screening-csv", required=True, type=Path, help="Input screening.csv path")
@@ -596,6 +644,31 @@ def _screen(args: argparse.Namespace) -> int:
     result = screen_connections(request)
     outputs = write_screening_outputs(result, args.output)
     print(f"screened {len(result.rows)} buses: {outputs.csv_path} {outputs.summary_path}")
+    return 0
+
+
+def _portfolio_screen(args: argparse.Namespace) -> int:
+    try:
+        result = run_portfolio_workflow(
+            PortfolioWorkflowRequest(
+                portfolio_path=args.portfolio,
+                cartostock_path=args.cartostock,
+                output_dir=args.output,
+                rte7000_revision=args.rte7000_revision,
+                rte7000_year=args.rte7000_year,
+                rte7000_month=args.rte7000_month,
+                rte7000_snapshot=args.rte7000_snapshot,
+                search_radius_km=args.search_radius_km,
+                osm_fixture_path=args.osm_fixture,
+            )
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"portfolio-screen error: {exc}")
+        return 2
+    print(
+        f"portfolio-screen ranked {len(result.screening.ranked_sites)} sites: "
+        f"{result.outputs.report_path} {result.outputs.manifest_path}"
+    )
     return 0
 
 

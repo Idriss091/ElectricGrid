@@ -1,4 +1,4 @@
-# Thesegrid Pipeline Demo
+# VoltPath Pipeline Demo
 
 This runbook defines the current single-command BESS evidence demo.
 

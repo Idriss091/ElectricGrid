@@ -163,6 +163,9 @@ def render_bundle_html(bundle_dir: Path) -> str:
     validation = _read_csv(bundle_dir / "validation_matrix.csv")
     resize = _read_csv(bundle_dir / "resize_results.csv")
     qsts = _read_csv(bundle_dir / "qsts_results.csv")
+    qsts_risk = _read_csv(bundle_dir / "qsts_risk_summary.csv")
+    screening = _read_csv(bundle_dir / "screening.csv")
+    stratified_candidates = _read_csv(bundle_dir / "stratified_candidate_selection.csv")
     sensitivity = _read_csv(bundle_dir / "sensitivity_results.csv")
     full_year_conditional = _read_csv(bundle_dir / "full_year_conditional_results.csv")
     full_year_additional = _read_csv(bundle_dir / "full_year_additional_results.csv")
@@ -174,12 +177,13 @@ def render_bundle_html(bundle_dir: Path) -> str:
     scorecard = render_bundle_scorecard(bundle_dir)
     metrics = _bundle_metrics(validation, resize, qsts, bundle_dir)
     context = _bundle_context(bundle_dir)
+    recommended_resize = _render_recommended_resize(resize)
     return f"""<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Thesegrid BESS Investor Evidence</title>
+  <title>VoltPath BESS Investor Evidence</title>
   <style>
     :root {{
       --ink: #17202a;
@@ -191,6 +195,7 @@ def render_bundle_html(bundle_dir: Path) -> str:
       --red: #9f1d20;
       --green: #147d64;
       --blue: #1f5f8b;
+      --teal: #0f766e;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -218,6 +223,22 @@ def render_bundle_html(bundle_dir: Path) -> str:
     a {{ color: var(--blue); font-weight: 700; }}
     .notice {{ background: #fff6db; border-left: 5px solid var(--amber); padding: 12px 16px; margin: 16px 0; }}
     .panel {{ background: var(--panel); border: 1px solid var(--line); padding: 18px; }}
+    .decision-callout {{ border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 22px 0; margin: 18px 0 6px; display: grid; grid-template-columns: .9fr 1.1fr; gap: 24px; align-items: start; }}
+    .decision-callout .eyebrow {{ color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 8px; }}
+    .decision-callout h2 {{ font-size: 32px; margin: 0 0 8px; }}
+    .decision-callout strong {{ color: var(--teal); }}
+    .decision-list {{ margin: 0; padding-left: 18px; }}
+    .decision-list li {{ margin: 0 0 8px; }}
+    .funnel {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 16px 0 8px; }}
+    .funnel-stage {{ background: var(--panel); border: 1px solid var(--line); padding: 14px; position: relative; min-height: 118px; }}
+    .funnel-stage::after {{ content: ""; position: absolute; top: 50%; right: -9px; width: 0; height: 0; border-top: 9px solid transparent; border-bottom: 9px solid transparent; border-left: 9px solid var(--line); transform: translateY(-50%); }}
+    .funnel-stage:last-child::after {{ display: none; }}
+    .funnel-stage strong {{ display: block; font-size: 26px; line-height: 1; margin: 6px 0 6px; }}
+    .funnel-stage span {{ color: var(--muted); font-size: 13px; }}
+    .metric-strip {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 14px 0; }}
+    .metric {{ background: var(--panel); border: 1px solid var(--line); padding: 12px; }}
+    .metric strong {{ display: block; font-size: 20px; margin-bottom: 4px; }}
+    .metric span {{ color: var(--muted); font-size: 12px; }}
     .kpis {{ display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 20px 0; }}
     .kpi {{ background: var(--panel); border: 1px solid var(--line); padding: 14px; min-height: 92px; }}
     .kpi strong {{ display: block; font-size: 26px; line-height: 1; margin-bottom: 8px; }}
@@ -229,9 +250,12 @@ def render_bundle_html(bundle_dir: Path) -> str:
     .artifact-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }}
     .artifact-grid a {{ background: var(--panel); border: 1px solid var(--line); padding: 12px; text-decoration: none; }}
     .scorecard {{ background: #edf2f4; border: 1px solid var(--line); padding: 16px; white-space: pre-wrap; overflow-x: auto; }}
+    details {{ border-top: 1px solid var(--line); padding: 14px 0; }}
+    summary {{ cursor: pointer; font-weight: 800; }}
     @media (max-width: 820px) {{
       main {{ padding: 22px 16px 42px; }}
-      .hero, .kpis, .artifact-grid {{ grid-template-columns: 1fr; }}
+      .hero, .decision-callout, .funnel, .metric-strip, .kpis, .artifact-grid {{ grid-template-columns: 1fr; }}
+      .funnel-stage::after {{ display: none; }}
       h1 {{ font-size: 34px; }}
     }}
   </style>
@@ -240,15 +264,33 @@ def render_bundle_html(bundle_dir: Path) -> str:
   <main>
     <section class="hero">
       <div>
-        <h1>Thesegrid BESS Investor Evidence</h1>
+        <h1>VoltPath BESS Investor Evidence</h1>
         <p>Flexible-connection pre-feasibility for a {_format_mw_header(context.requested_mw)} {html.escape(context.asset.upper())} candidate set on network <strong>{html.escape(context.network_code)}</strong>.</p>
-        <p class="notice">This is a buyer-side pre-feasibility aid, not an official grid-connection study, PTF, or RTE/Enedis offer.</p>
       </div>
       <aside class="panel">
         <h3>Investment Decision</h3>
         <p>{_decision_sentence(metrics, context.requested_mw)}</p>
         <p>{_badge("no-go", "badge-no-go")} {_badge("resize-recommended", "badge-resize")} {_badge("full-year evidence", "badge-evidence")}</p>
       </aside>
+    </section>
+
+    {_render_investor_recommendation(qsts, qsts_risk, context)}
+
+    <section>
+      <h2>Site Selection Funnel</h2>
+      <p>The report narrows a large bus list into investable evidence: fast screening first, stratified QSTS for the shortlist, then full-year QSTS only on the finalists.</p>
+      {_render_site_selection_funnel(screening, stratified_candidates, full_year_candidates, qsts, metrics)}
+    </section>
+
+    <section>
+      <h2>Candidate Ranking</h2>
+      <p>Full-year QSTS is the decision evidence. The ranking prefers acceptable decisions, then lower annual curtailed energy, then lower P90 curtailment.</p>
+      {_render_candidate_ranking(qsts, qsts_risk)}
+    </section>
+
+    <section>
+      <h2>Why Conditions?</h2>
+      {_render_conditions_explainer(qsts, qsts_risk, context)}
     </section>
 
     <section>
@@ -261,60 +303,52 @@ def render_bundle_html(bundle_dir: Path) -> str:
       </div>
     </section>
 
-    <section>
-      <h2>Recommended Resize</h2>
-      {_render_recommended_resize(resize)}
-    </section>
+    {_render_resize_section(recommended_resize)}
 
     <section>
       <h2>Decision Summary</h2>
-      {_html_table(_decision_summary_rows(validation))}
-    </section>
-
-    <section>
-      <h2>{_evidence_boundary_heading(context)}</h2>
-      {_render_evidence_boundary(context)}
-    </section>
-
-    <section>
-      <h2>Regulatory Assumption Traceability</h2>
-      <p class="notice">The RTE/CRE-inspired gabarit preset is a Thesegrid pre-feasibility proxy. Each rule is labelled with source timing, scope, hypothesis status, and limitation to avoid implying an official PTF or operator offer.</p>
-      {_html_table(gabarit_rows)}
-    </section>
-
-    <section>
-      <h2>Scorecard</h2>
-      <div class="scorecard">{html.escape(scorecard)}</div>
-    </section>
-
-    <section>
-      <h2>Evidence Tables</h2>
-      <h3>Validation Matrix</h3>
-      {_html_table(validation)}
-      <h3>Full-Year QSTS Results</h3>
-      {_html_table(qsts)}
-      <h3>Resize Evidence</h3>
-      {_html_table(resize)}
-    </section>
-
-    <section>
-      <h2>Decision Matrix</h2>
-      <p class="notice">This matrix is stratified QSTS evidence when generated from the bus-by-MW sweep. Full-year QSTS is required before using any go verdict as investor-grade evidence.</p>
-      {_render_decision_matrix(sensitivity)}
-      <h3>Recommended MW by Bus</h3>
-      {_render_recommended_mw_by_bus(sensitivity)}
-      <h3>Full-Year Conditional Checks</h3>
-      {_render_full_year_conditional_checks(full_year_checks)}
-      <h3>Decision Frontier</h3>
-      {_render_decision_frontier(decision_frontier or _frontier_rows(qsts, full_year_checks))}
-      <h3>Next Full-Year Candidates</h3>
-      {_render_next_full_year_candidates(full_year_candidates)}
+      {_html_table(_decision_summary_rows(validation, qsts))}
     </section>
 
     <section>
       <h2>Proxy Economics</h2>
       <p class="notice">This is proxy economics, not bankable revenue modelling. Values are scenario-comparison aids only.</p>
       {_html_table(_stringify_rows(economic_scenario_rows(economic_scenarios)))}
+    </section>
+
+    <section>
+      <h2>Technical Appendix</h2>
+      <details open>
+        <summary>Regulatory Assumption Traceability</summary>
+        <p class="notice">The RTE/CRE-inspired gabarit preset is a VoltPath pre-feasibility proxy. Each rule is labelled with source timing, scope, hypothesis status, and limitation to avoid implying an official PTF or operator offer.</p>
+        {_html_table(gabarit_rows)}
+      </details>
+      <details>
+        <summary>Scorecard</summary>
+        <div class="scorecard">{html.escape(scorecard)}</div>
+      </details>
+      <details>
+        <summary>Evidence Tables</summary>
+        <h3>Validation Matrix</h3>
+        {_html_table(validation)}
+        <h3>Full-Year QSTS Results</h3>
+        {_html_table(qsts)}
+        <h3>Resize Evidence</h3>
+        {_html_table(resize)}
+      </details>
+      <details>
+        <summary>Decision Matrix</summary>
+        <p class="notice">This matrix is stratified QSTS evidence when generated from the bus-by-MW sweep. Full-year QSTS is required before using any go verdict as investor-grade evidence.</p>
+        {_render_decision_matrix(sensitivity)}
+        <h3>Recommended MW by Bus</h3>
+        {_render_recommended_mw_by_bus(sensitivity)}
+        <h3>Full-Year Conditional Checks</h3>
+        {_render_full_year_conditional_checks(full_year_checks)}
+        <h3>Decision Frontier</h3>
+        {_render_decision_frontier(decision_frontier or _frontier_rows(qsts, full_year_checks))}
+        <h3>Next Full-Year Candidates</h3>
+        {_render_next_full_year_candidates(full_year_candidates)}
+      </details>
     </section>
 
     <section>
@@ -333,9 +367,174 @@ def render_bundle_html(bundle_dir: Path) -> str:
         {_artifact_link("run_manifest.json")}
       </div>
     </section>
+
+    <section>
+      <h2>Important Notice</h2>
+      <p class="notice">This is a buyer-side pre-feasibility aid, not an official grid-connection study, PTF, or RTE/Enedis offer.</p>
+    </section>
   </main>
 </body>
 </html>
+"""
+
+
+def _render_investor_recommendation(
+    qsts: list[dict[str, str]],
+    qsts_risk: list[dict[str, str]],
+    context: BundleContext,
+) -> str:
+    best = _best_qsts_candidate(qsts)
+    if best is None:
+        return """
+    <section class="decision-callout">
+      <div>
+        <div class="eyebrow">Recommendation</div>
+        <h2>Run full-year QSTS</h2>
+        <p>No full-year finalist is available in this bundle yet.</p>
+      </div>
+      <div><p>Use this report after the shortlist has at least one full-year QSTS row.</p></div>
+    </section>
+"""
+
+    risk = _risk_for_bus(best, qsts_risk)
+    decision = _decision_label(_qsts_decision(best))
+    bus_label = _bus_label(best)
+    annual_mwh = _risk_float(risk, best, "expected_curtailment_mwh")
+    p90_mw = _risk_float(risk, best, "curtailment_p90_mw", "p90_curtailment_mw")
+    event_hours = _risk_text(risk, best, "max_event_hours")
+    event_mwh = _risk_float(risk, best, "max_event_mwh")
+    condition = _condition_instruction(risk.get("dominant_constraint") or best.get("main_recurring_constraint", ""))
+    return f"""
+    <section class="decision-callout">
+      <div>
+        <div class="eyebrow">Recommendation</div>
+        <h2>{html.escape(decision)}</h2>
+        <p><strong>Recommended candidate:</strong> {html.escape(bus_label)} at {_format_mw_header(context.requested_mw)}.</p>
+        <p>{html.escape(condition)}</p>
+      </div>
+      <div>
+        <ul class="decision-list">
+          <li>Full-year QSTS evidence is available for this candidate.</li>
+          <li>Expected curtailed energy is {_format_optional_mwh(annual_mwh)} over the year.</li>
+          <li>P90 curtailment is {_format_optional_mw(p90_mw)}, so most operating hours are unconstrained.</li>
+          <li>The worst detected event lasts {_format_optional_hours(event_hours)} and represents {_format_optional_mwh(event_mwh)}.</li>
+        </ul>
+      </div>
+    </section>
+"""
+
+
+def _render_site_selection_funnel(
+    screening: list[dict[str, str]],
+    stratified_candidates: list[dict[str, str]],
+    full_year_candidates: list[dict[str, str]],
+    qsts: list[dict[str, str]],
+    metrics: dict[str, object],
+) -> str:
+    full_year_rows = [row for row in qsts if row.get("validation_level") in {"", "qsts_full_year"}]
+    acceptable = sum(1 for row in full_year_rows if _qsts_decision(row) in {"go", "go-with-conditions"})
+    stages = [
+        {
+            "title": "Screening",
+            "value": _count_or_dash(screening),
+            "text": "Fast static capacity pass across candidate buses.",
+        },
+        {
+            "title": "Stratified QSTS",
+            "value": _count_or_dash(stratified_candidates),
+            "text": "Representative days narrow the shortlist before expensive full-year runs.",
+        },
+        {
+            "title": "Full-year QSTS",
+            "value": str(len(full_year_rows)) if full_year_rows else str(metrics["full_year_coverage"]),
+            "text": "Hourly validation over the full simulated year for the finalists.",
+        },
+        {
+            "title": "Decision",
+            "value": str(acceptable),
+            "text": "Candidates with go or go-with-conditions under the selected policy.",
+        },
+    ]
+    cards = "".join(
+        f"""
+        <div class="funnel-stage">
+          <h3>{html.escape(stage["title"])}</h3>
+          <strong>{html.escape(stage["value"])}</strong>
+          <span>{html.escape(stage["text"])}</span>
+        </div>
+"""
+        for stage in stages
+    )
+    return f'<div class="funnel">{cards}</div>'
+
+
+def _render_candidate_ranking(
+    qsts: list[dict[str, str]],
+    qsts_risk: list[dict[str, str]],
+) -> str:
+    if not qsts:
+        return "<p>No full-year QSTS candidate rows are available yet.</p>"
+    rows: list[dict[str, str]] = []
+    for index, row in enumerate(_sorted_qsts_candidates(qsts), start=1):
+        risk = _risk_for_bus(row, qsts_risk)
+        annual_mwh = _risk_float(risk, row, "expected_curtailment_mwh")
+        p90_mw = _risk_float(risk, row, "curtailment_p90_mw", "p90_curtailment_mw")
+        hours = _risk_text(risk, row, "curtailment_hours", "violation_hours")
+        event_hours = _risk_text(risk, row, "max_event_hours")
+        event_mwh = _risk_float(risk, row, "max_event_mwh")
+        rows.append(
+            {
+                "rank": str(index),
+                "bus": _bus_label(row),
+                "decision": _qsts_decision(row),
+                "annual_curtailed_mwh": _format_optional_number(annual_mwh, "MWh"),
+                "constrained_hours": _format_optional_hours(hours),
+                "p90_curtailment_mw": _format_optional_number(p90_mw, "MW"),
+                "worst_event": _format_event(event_hours, event_mwh),
+                "condition": _condition_instruction(
+                    risk.get("dominant_constraint") or row.get("main_recurring_constraint", "")
+                ),
+            }
+        )
+    return _html_table(rows)
+
+
+def _render_conditions_explainer(
+    qsts: list[dict[str, str]],
+    qsts_risk: list[dict[str, str]],
+    context: BundleContext,
+) -> str:
+    best = _best_qsts_candidate(qsts)
+    if best is None:
+        return "<p>No full-year QSTS row is available to explain conditions yet.</p>"
+    risk = _risk_for_bus(best, qsts_risk)
+    annual_mwh = _risk_float(risk, best, "expected_curtailment_mwh")
+    p90_mw = _risk_float(risk, best, "curtailment_p90_mw", "p90_curtailment_mw")
+    hours = _risk_text(risk, best, "curtailment_hours", "violation_hours")
+    event_hours = _risk_text(risk, best, "max_event_hours")
+    event_mwh = _risk_float(risk, best, "max_event_mwh")
+    condition = _condition_instruction(risk.get("dominant_constraint") or best.get("main_recurring_constraint", ""))
+    return f"""
+      <p>The selected candidate is not labelled plain go because the network is not firm for every simulated hour at {_format_mw_header(context.requested_mw)}. It is labelled <strong>go-with-conditions</strong> because the full-year risk is limited and can be translated into a flexible operating envelope.</p>
+      <div class="metric-strip">
+        <div class="metric"><strong>{_format_optional_hours(hours)}</strong><span>constrained hours in the year</span></div>
+        <div class="metric"><strong>{_format_optional_mwh(annual_mwh)}</strong><span>expected curtailed energy</span></div>
+        <div class="metric"><strong>{_format_event(event_hours, event_mwh)}</strong><span>worst single event</span></div>
+        <div class="metric"><strong>{_format_optional_mw(p90_mw)}</strong><span>P90 curtailment</span></div>
+      </div>
+      <p><strong>Operational condition:</strong> {html.escape(condition)}</p>
+      <p>For a BESS developer, this is the value proposition: avoid rejecting a mostly workable site, but price and contract the rare constrained hours instead of pretending the connection is fully firm.</p>
+"""
+
+
+def _render_resize_section(rendered_resize: str) -> str:
+    if "No resize recommendation is available." in rendered_resize:
+        return ""
+    return f"""
+    <section>
+      <h2>Recommended Resize</h2>
+      {rendered_resize}
+    </section>
 """
 
 
@@ -407,7 +606,24 @@ def _manifest_float(value: object, default: float) -> float:
     return default
 
 
-def _decision_summary_rows(validation: list[dict[str, str]]) -> list[dict[str, str]]:
+def _decision_summary_rows(
+    validation: list[dict[str, str]],
+    qsts: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    if not validation and qsts:
+        return [
+            {
+                "bus_id": row.get("bus_id", ""),
+                "bus_name": row.get("bus_name", ""),
+                "full_year_verdict": row.get("qsts_verdict", ""),
+                "final_decision": row.get("product_decision") or row.get("qsts_verdict", ""),
+                "validation_level": row.get("validation_level", ""),
+                "decision_confidence": row.get("decision_confidence", ""),
+                "recommended_next_action": row.get("recommended_next_action", ""),
+                "dominant_constraint": row.get("main_recurring_constraint", ""),
+            }
+            for row in qsts
+        ]
     return [
         {
             "bus_id": row.get("bus_id", ""),
@@ -464,7 +680,7 @@ def _render_evidence_boundary(context: BundleContext) -> str:
         f"<p>{html.escape(next_step)}</p>"
         "<p><strong>MVP Decision Policy:</strong> <code>docs/mvp-decision-policy.md</code>. "
         "The default investor-facing policy is <code>standard</code>; thresholds are "
-        "Thesegrid pre-feasibility assumptions, not official operator thresholds.</p>"
+        "VoltPath pre-feasibility assumptions, not official operator thresholds.</p>"
         + _html_table(rows)
     )
 
@@ -475,11 +691,21 @@ def _bundle_metrics(
     qsts: list[dict[str, str]],
     bundle_dir: Path,
 ) -> dict[str, object]:
-    del qsts
     performance = _read_json(bundle_dir / "qsts_performance.json")
-    total_buses = len(validation)
-    full_year_buses = sum(1 for row in validation if row.get("qsts_full_year_verdict"))
-    full_year_no_go = sum(1 for row in validation if _primary_verdict(row) == "no-go")
+    evidence_rows = validation if validation else qsts
+    total_buses = len(evidence_rows)
+    if validation:
+        full_year_buses = sum(1 for row in validation if row.get("qsts_full_year_verdict"))
+        full_year_no_go = sum(1 for row in validation if _primary_verdict(row) == "no-go")
+    else:
+        full_year_buses = sum(
+            1 for row in qsts if row.get("validation_level") == "qsts_full_year"
+        )
+        full_year_no_go = sum(
+            1
+            for row in qsts
+            if (row.get("product_decision") or row.get("qsts_verdict")) == "no-go"
+        )
     false_positive_stratified = sum(
         1 for row in validation if row.get("calibration_status") == "false_positive_stratified"
     )
@@ -502,6 +728,143 @@ def _decision_sentence(metrics: dict[str, object], requested_mw: float) -> str:
         f"{_format_mw_header(requested_mw)}, with "
         f"{metrics['resize_recommendations']} actionable resize recommendation."
     )
+
+
+def _best_qsts_candidate(rows: list[dict[str, str]]) -> dict[str, str] | None:
+    sorted_rows = _sorted_qsts_candidates(rows)
+    return sorted_rows[0] if sorted_rows else None
+
+
+def _sorted_qsts_candidates(rows: list[dict[str, str]]) -> list[dict[str, str]]:
+    return sorted(rows, key=_qsts_sort_key)
+
+
+def _qsts_sort_key(row: dict[str, str]) -> tuple[int, float, float, int | str]:
+    decision_rank = {
+        "go": 0,
+        "go-with-conditions": 1,
+        "resize-recommended": 2,
+        "no-go": 3,
+    }
+    bus_id = row.get("bus_id", "")
+    bus_key: int | str = int(bus_id) if bus_id.isdigit() else bus_id
+    return (
+        decision_rank.get(_qsts_decision(row), 9),
+        _float_or_none(row.get("expected_curtailment_mwh") or row.get("weighted_curtailment_mwh")) or 0.0,
+        _float_or_none(row.get("p90_curtailment_mw") or row.get("qsts_p90_curtailment_mw")) or 0.0,
+        bus_key,
+    )
+
+
+def _qsts_decision(row: dict[str, str]) -> str:
+    return row.get("product_decision") or row.get("qsts_verdict") or row.get("final_decision", "")
+
+
+def _risk_for_bus(
+    qsts_row: dict[str, str],
+    risk_rows: list[dict[str, str]],
+) -> dict[str, str]:
+    bus_id = qsts_row.get("bus_id", "")
+    if not bus_id:
+        return {}
+    for row in risk_rows:
+        if row.get("bus_id") == bus_id:
+            return row
+    return {}
+
+
+def _risk_text(
+    risk: dict[str, str],
+    fallback: dict[str, str],
+    *keys: str,
+) -> str:
+    for key in keys:
+        value = risk.get(key) or fallback.get(key)
+        if value not in {None, ""}:
+            return value
+    return ""
+
+
+def _risk_float(
+    risk: dict[str, str],
+    fallback: dict[str, str],
+    *keys: str,
+) -> float | None:
+    return _float_or_none(_risk_text(risk, fallback, *keys))
+
+
+def _bus_label(row: dict[str, str]) -> str:
+    bus_id = row.get("bus_id", "")
+    bus_name = row.get("bus_name", "")
+    if bus_id and bus_name:
+        return f"bus {bus_id} - {bus_name}"
+    if bus_id:
+        return f"bus {bus_id}"
+    return bus_name or "candidate"
+
+
+def _decision_label(decision: str) -> str:
+    labels = {
+        "go": "Proceed",
+        "go-with-conditions": "Proceed with conditions",
+        "resize-recommended": "Proceed after resize",
+        "no-go": "Do not proceed at this size",
+    }
+    return labels.get(decision, decision or "Decision pending")
+
+
+def _condition_instruction(constraint: str) -> str:
+    normalized = constraint.lower()
+    if "vm_pu.max" in normalized or "voltage high" in normalized:
+        return "Limit export during rare high-voltage hours."
+    if "vm_pu.min" in normalized or "voltage low" in normalized:
+        return "Limit withdrawal during rare low-voltage hours."
+    if "loading" in normalized or "thermal" in normalized or "line" in normalized:
+        return "Respect a thermal loading envelope during constrained hours."
+    return "Operate under the flexible envelope during constrained hours."
+
+
+def _count_or_dash(rows: list[dict[str, str]]) -> str:
+    return str(len(rows)) if rows else "-"
+
+
+def _format_optional_number(value: float | None, unit: str) -> str:
+    if value is None:
+        return ""
+    return f"{value:.2f} {unit}"
+
+
+def _format_optional_mwh(value: float | None) -> str:
+    if value is None:
+        return "not available"
+    return f"{value:.2f} MWh"
+
+
+def _format_optional_mw(value: float | None) -> str:
+    if value is None:
+        return "not available"
+    return f"{value:.2f} MW"
+
+
+def _format_optional_hours(value: str) -> str:
+    if not value:
+        return ""
+    parsed = _float_or_none(value)
+    if parsed is None:
+        return value
+    return f"{parsed:.0f} h"
+
+
+def _format_event(hours: str, mwh: float | None) -> str:
+    hours_text = _format_optional_hours(hours)
+    mwh_text = _format_optional_mwh(mwh)
+    if not hours_text and mwh is None:
+        return ""
+    if not hours_text:
+        return mwh_text
+    if mwh is None:
+        return hours_text
+    return f"{hours_text} / {mwh_text}"
 
 
 def _primary_verdict(row: dict[str, str]) -> str:
@@ -698,7 +1061,7 @@ def _render_decision_frontier(rows: list[dict[str, str]]) -> str:
         )
     return (
         "<p>This table reclassifies full-year evidence under several curtailment-risk "
-        "policies. These are Thesegrid policy assumptions for pre-feasibility, not "
+        "policies. These are VoltPath policy assumptions for pre-feasibility, not "
         "official network-operator thresholds. The default investor policy is "
         "<code>standard</code>.</p>"
         + _html_table(_decision_policy_rows())
@@ -714,7 +1077,7 @@ def _decision_policy_rows() -> list[dict[str, str]]:
             "policy_max_energy_ratio": f"{policy.max_energy_ratio:.6f}",
             "policy_max_event_hours": str(policy.max_event_hours),
             "policy_max_event_mwh_per_mw": f"{policy.max_event_mwh_per_mw:.6f}",
-            "status": "Thesegrid policy assumption, not official threshold",
+            "status": "VoltPath policy assumption, not official threshold",
         }
         for policy in DECISION_FRONTIER_POLICIES
     ]

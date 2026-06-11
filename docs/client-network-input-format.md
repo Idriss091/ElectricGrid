@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines the target input package for applying Thesegrid to a client,
+This document defines the target input package for applying VoltPath to a client,
 consultant, or operator-grade network model instead of a SimBench benchmark network.
 
 The current investor bundle uses SimBench to prove the workflow. A commercial pilot
@@ -172,7 +172,7 @@ consultant studies.
 
 ## Pilot acceptance levels
 
-Thesegrid reports should label evidence as:
+VoltPath reports should label evidence as:
 
 - `benchmark_demo`: SimBench or other public benchmark evidence;
 - `client_model_static`: client model with static screening only;

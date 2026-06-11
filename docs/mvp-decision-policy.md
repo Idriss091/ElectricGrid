@@ -1,6 +1,6 @@
 # MVP Decision Policy
 
-This document defines the default investor-facing decision policy for the Thesegrid BESS
+This document defines the default investor-facing decision policy for the VoltPath BESS
 pre-feasibility MVP.
 
 The default investor-facing policy is `standard`.
@@ -14,7 +14,10 @@ No QSTS curtailment is observed for the requested MW at the evaluated validation
 `go-with-conditions`
 
 Curtailment is observed, but P90 curtailed MW ratio, curtailed-energy ratio, maximum
-event duration, and maximum event MWh per MW all stay within the selected policy.
+event duration, and maximum event MWh per MW are acceptable under the selected policy.
+For BESS pre-feasibility, an event can exceed the comfort event-energy threshold and
+still remain `go-with-conditions` when P90 risk, annual energy risk, and event duration
+remain within policy and the event stays below the policy's conditional hard cap.
 
 `resize-recommended`
 
@@ -38,14 +41,16 @@ policy:
 - p90_curtailment_ratio <= 10%
 - curtailment_energy_ratio <= 1.0%
 - max_event_hours <= 12
-- max_event_mwh_per_mw <= 1.0
+- comfort max_event_mwh_per_mw <= 1.0
+- conditional hard cap max_event_mwh_per_mw <= 2.0
 
 ## Status
 
-These thresholds are Thesegrid pre-feasibility policy assumptions. They are not RTE, Enedis, CRE, or official operator thresholds.
+These thresholds are VoltPath pre-feasibility policy assumptions. They are not RTE, Enedis, CRE, or official operator thresholds.
 
-The legacy absolute QSTS tolerances remain useful for diagnostics, but investor-facing
-decisions should use the policy frontier when `decision_frontier.csv` is available.
+The comfort event-energy threshold is a warning threshold, not an automatic rejection
+threshold. The conditional hard cap is the standard-policy rejection threshold when
+P90, annual energy, and event duration remain acceptable.
 
 ## Calibration Needed
 

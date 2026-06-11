@@ -386,7 +386,7 @@ def render_pipeline_report(
         if best is not None
         else "none"
     )
-    return f"""# Thesegrid Pipeline Report
+    return f"""# VoltPath Pipeline Report
 
 This report summarizes the first pipeline tranche for BESS flexible-connection
 pre-feasibility. It is a buyer-side decision aid and does not replace an official

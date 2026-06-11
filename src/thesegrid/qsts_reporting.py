@@ -28,8 +28,6 @@ QSTS_RESULT_COLUMNS = (
     "bus_name",
     "product_decision",
     "selected_policy",
-    "selected_policy_verdict",
-    "legacy_qsts_verdict",
     "qsts_verdict",
     "validation_level",
     "decision_confidence",
@@ -96,8 +94,6 @@ INVESTOR_DECISION_COLUMNS = (
     "bus_name",
     "product_decision",
     "selected_policy",
-    "selected_policy_verdict",
-    "legacy_qsts_verdict",
     "qsts_verdict",
     "validation_level",
     "decision_confidence",
@@ -284,6 +280,11 @@ def decision_frontier_row(row: Any) -> dict[str, object]:
         "policy_max_energy_ratio": f"{row.policy_definition.max_energy_ratio:.6f}",
         "policy_max_event_hours": row.policy_definition.max_event_hours,
         "policy_max_event_mwh_per_mw": f"{row.policy_definition.max_event_mwh_per_mw:.6f}",
+        "policy_conditional_max_event_mwh_per_mw": (
+            ""
+            if row.policy_definition.conditional_max_event_mwh_per_mw is None
+            else f"{row.policy_definition.conditional_max_event_mwh_per_mw:.6f}"
+        ),
         "frontier_verdict": row.frontier_verdict,
         "validation_level": row.validation_level,
     }
@@ -306,9 +307,7 @@ def bus_result_row(
         "bus_name": bus.bus_name,
         "product_decision": policy_verdict,
         "selected_policy": request.selected_policy,
-        "selected_policy_verdict": policy_verdict,
-        "legacy_qsts_verdict": bus.qsts_verdict,
-        "qsts_verdict": bus.qsts_verdict,
+        "qsts_verdict": policy_verdict,
         "validation_level": validation_level(request, evaluated_time_steps),
         "decision_confidence": decision_confidence(request, evaluated_time_steps),
         "recommended_next_action": recommended_next_action(
@@ -351,9 +350,7 @@ def investor_decision_row(
         "bus_name": bus.bus_name,
         "product_decision": policy_verdict,
         "selected_policy": request.selected_policy,
-        "selected_policy_verdict": policy_verdict,
-        "legacy_qsts_verdict": bus.qsts_verdict,
-        "qsts_verdict": bus.qsts_verdict,
+        "qsts_verdict": policy_verdict,
         "validation_level": validation_level(request, evaluated_time_steps),
         "decision_confidence": decision_confidence(request, evaluated_time_steps),
         "recommended_next_action": recommended_next_action(
@@ -379,8 +376,8 @@ def render_qsts_table(
     evaluated_time_steps: int = 0,
 ) -> str:
     lines = [
-        "| rank | bus_id | bus_name | product_decision | selected_policy | legacy_qsts_verdict | validation_level | confidence | next_action | static_firm_mw | static_conditional_mw | qsts_p90_mw | qsts_mwh |",
-        "| ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |",
+        "| rank | bus_id | bus_name | product_decision | selected_policy | validation_level | confidence | next_action | static_firm_mw | static_conditional_mw | qsts_p90_mw | qsts_mwh |",
+        "| ---: | ---: | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: |",
     ]
     for bus in buses:
         policy_verdict = selected_policy_verdict(bus, request, evaluated_time_steps)
@@ -392,7 +389,7 @@ def render_qsts_table(
         lines.append(
             "| "
             f"{bus.rank} | {bus.bus_id} | {bus.bus_name} | {policy_verdict} | "
-            f"{request.selected_policy} | {bus.qsts_verdict} | "
+            f"{request.selected_policy} | "
             f"{validation_level(request, evaluated_time_steps)} | "
             f"{decision_confidence(request, evaluated_time_steps)} | "
             f"{recommended_next_action(policy_verdict, driver, request, evaluated_time_steps)} | "
@@ -424,8 +421,8 @@ def render_investor_decision_table(
     evaluated_time_steps: int = 0,
 ) -> str:
     lines = [
-        "| rank | bus_id | product_decision | selected_policy | selected_policy_verdict | legacy_qsts_verdict | validation_level | confidence | next_action | static_firm_mw | static_conditional_mw | qsts_p90_mw | qsts_mwh | main_constraint |",
-        "| ---: | ---: | --- | --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
+        "| rank | bus_id | product_decision | selected_policy | validation_level | confidence | next_action | static_firm_mw | static_conditional_mw | qsts_p90_mw | qsts_mwh | main_constraint |",
+        "| ---: | ---: | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     for bus in buses:
         policy_verdict = selected_policy_verdict(bus, request, evaluated_time_steps)
@@ -437,7 +434,6 @@ def render_investor_decision_table(
         lines.append(
             "| "
             f"{bus.rank} | {bus.bus_id} | {policy_verdict} | {request.selected_policy} | "
-            f"{policy_verdict} | {bus.qsts_verdict} | "
             f"{validation_level(request, evaluated_time_steps)} | "
             f"{decision_confidence(request, evaluated_time_steps)} | "
             f"{recommended_next_action(policy_verdict, driver, request, evaluated_time_steps)} | "
@@ -504,13 +500,12 @@ def render_decision_snapshot(
         f"- decision_confidence: {decision_confidence(result.request, result.performance.evaluated_time_steps)}",
         f"- selected_policy: {result.request.selected_policy}",
         f"- product_decision: {primary_decision}",
-        f"- legacy_qsts_verdict: {primary_bus.qsts_verdict}",
         "- investor_reference: qsts_full_year",
         "- recommended_next_action: "
         f"{recommended_next_action(primary_decision, primary_risk.verdict_driver, result.request, result.performance.evaluated_time_steps)}",
         "",
-        "| bus_id | product_decision | selected_policy | legacy_qsts_verdict | p90_mw | expected_mwh | p95_mw | p99_mw | max_mw | dominant_constraint | recommended_next_action |",
-        "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        "| bus_id | product_decision | selected_policy | p90_mw | expected_mwh | p95_mw | p99_mw | max_mw | dominant_constraint | recommended_next_action |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     risk_by_bus = {row.bus_id: row for row in risk_rows}
     for bus in result.buses:
@@ -523,7 +518,6 @@ def render_decision_snapshot(
         lines.append(
             "| "
             f"{bus.bus_id} | {product_decision} | {result.request.selected_policy} | "
-            f"{bus.qsts_verdict} | "
             f"{bus.curtailment.p90_mw:.3f} | {bus.curtailment.expected_mwh:.3f} | "
             f"{risk.curtailment_p95_mw:.3f} | {risk.curtailment_p99_mw:.3f} | "
             f"{risk.curtailment_max_mw:.3f} | {risk.dominant_constraint or '-'} | "
@@ -552,8 +546,8 @@ def render_qsts_investment_table(
 ) -> str:
     contract_ranges = contractual_p10_ranges(contractual_rows)
     lines = [
-        "| rank | bus_id | product_decision | selected_policy | legacy_qsts_verdict | firm_mw | conditional_mw | contract_p10_min_mw | contract_p10_max_mw | qsts_p90_mw | qsts_mwh | dominant_constraint |",
-        "| ---: | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| rank | bus_id | product_decision | selected_policy | firm_mw | conditional_mw | contract_p10_min_mw | contract_p10_max_mw | qsts_p90_mw | qsts_mwh | dominant_constraint |",
+        "| ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for bus in result.buses:
         contract_min, contract_max = contract_ranges.get(bus.bus_id, (None, None))
@@ -565,7 +559,6 @@ def render_qsts_investment_table(
         lines.append(
             "| "
             f"{bus.rank} | {bus.bus_id} | {product_decision} | {result.request.selected_policy} | "
-            f"{bus.qsts_verdict} | "
             f"{bus.static_firm_capacity_mw:.3f} | "
             f"{bus.static_conditional_capacity_mw:.3f} | "
             f"{format_optional_float(contract_min)} | "
@@ -581,8 +574,8 @@ def render_qsts_economics_table(result: Any) -> str:
     if not result.buses:
         return "No per-bus economics rows available."
     lines = [
-        "| bus_id | product_decision | selected_policy | legacy_qsts_verdict | weighted_mwh | annual_curtailment_loss | annual_ebitda_proxy | connect_now_value | wait_value | delta_npv |",
-        "| ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| bus_id | product_decision | selected_policy | weighted_mwh | annual_curtailment_loss | annual_ebitda_proxy | connect_now_value | wait_value | delta_npv |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for bus in result.buses:
         economics = qsts_bus_economics_proxy(result.request, bus)
@@ -594,7 +587,7 @@ def render_qsts_economics_table(result: Any) -> str:
         lines.append(
             "| "
             f"{bus.bus_id} | {product_decision} | {result.request.selected_policy} | "
-            f"{bus.qsts_verdict} | {bus.weighted_curtailment_mwh:.3f} | "
+            f"{bus.weighted_curtailment_mwh:.3f} | "
             f"{economics.annual_curtailment_loss_eur:.2f} | "
             f"{economics.annual_ebitda_proxy_eur:.2f} | "
             f"{economics.connect_now_value_eur:.2f} | "

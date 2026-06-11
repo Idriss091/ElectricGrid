@@ -56,7 +56,7 @@ SOURCE_URL = (
     "offres-de-raccordement-a-gabarit-pour-les-installations-de-stockage.html"
 )
 SCOPE = "France BESS buyer-side pre-feasibility"
-HYPOTHESIS_STATUS = "thesegrid_proxy_not_official"
+HYPOTHESIS_STATUS = "voltpath_proxy_not_official"
 LIMITATION = "Pre-feasibility assumption only; not a PTF, official offer, or operator study."
 PRUDENCE_LEVEL = "conservative_pre_feasibility"
 

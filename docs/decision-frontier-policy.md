@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Thesegrid should not use a single hard-coded curtailment threshold as if it were a
+VoltPath should not use a single hard-coded curtailment threshold as if it were a
 universal truth.
 
 Flexible connections are commercial and contractual decisions. The same full-year QSTS

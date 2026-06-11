@@ -77,7 +77,7 @@ def test_gabarit_rule_rows_expose_regulatory_traceability_fields():
     assert row["source_publication_date"] == "2026-02-20"
     assert row["effective_date"] == "2026-02-12"
     assert row["scope"] == "France BESS buyer-side pre-feasibility"
-    assert row["hypothesis_status"] == "thesegrid_proxy_not_official"
+    assert row["hypothesis_status"] == "voltpath_proxy_not_official"
     assert row["source_url"] == (
         "https://www.services-rte.com/fr/actualites/"
         "offres-de-raccordement-a-gabarit-pour-les-installations-de-stockage.html"

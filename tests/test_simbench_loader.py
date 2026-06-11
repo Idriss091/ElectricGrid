@@ -1,6 +1,8 @@
 import importlib.util
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +10,12 @@ import pytest
 def test_loads_small_simbench_network_when_dependency_is_available():
     if importlib.util.find_spec("simbench") is None:
         pytest.skip("simbench is not installed in this environment")
+
+    source_dir = Path(__file__).resolve().parents[1] / "src"
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    pythonpath = str(source_dir)
+    if existing_pythonpath:
+        pythonpath = f"{pythonpath}{os.pathsep}{existing_pythonpath}"
 
     result = subprocess.run(
         [
@@ -22,6 +30,7 @@ def test_loads_small_simbench_network_when_dependency_is_available():
         check=False,
         capture_output=True,
         text=True,
+        env={**os.environ, "PYTHONPATH": pythonpath},
     )
 
     assert result.returncode == 0, result.stderr

@@ -32,7 +32,7 @@ def test_run_pipeline_writes_screening_selection_report_and_manifest(tmp_path):
     assert result.stratified_selection_csv_path.exists()
 
     report = result.report_path.read_text(encoding="utf-8")
-    assert "# Thesegrid Pipeline Report" in report
+    assert "# VoltPath Pipeline Report" in report
     assert "## Executive Summary" in report
     assert "evaluated_buses: 1" in report
     assert "stratified_shortlist_size: 1" in report

@@ -1,0 +1,4 @@
+client_site_id,latitude,longitude,requested_mw,storage_duration_hours,land_control_status,target_connection_date,max_connection_distance_km,preferred_voltage_kv,project_notes
+GERS-JALIS-01,43.646,0.586,50,2,secured,2028-09-30,15,225,Site prioritaire proche du poste de Jalis
+GERS-JALIS-02,43.85,0.60,200,4,,,35,225,Projet amont à documenter avant engagement foncier
+GERS-JALIS-03,44.10,0.60,100,2,option,2029-06-30,20,225,Distance maximale client volontairement restrictive

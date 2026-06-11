@@ -979,9 +979,9 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
     assert rows[0]["bus_id"] == "1"
     assert rows[0]["product_decision"] == "go"
     assert rows[0]["selected_policy"] == "standard"
-    assert rows[0]["selected_policy_verdict"] == "go"
-    assert rows[0]["legacy_qsts_verdict"] == "go"
     assert rows[0]["qsts_verdict"] == "go"
+    assert "selected_policy_verdict" not in rows[0]
+    assert "legacy_qsts_verdict" not in rows[0]
     assert rows[0]["p90_curtailment_tolerance_mw"] == "0.000000"
     detail = outputs.bus_detail_paths[0].read_text(encoding="utf-8")
     assert "direction" in detail
@@ -993,7 +993,7 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
     assert "baseline-aware" in summary
     assert "Investor Decision Table" in summary
     assert (
-        "| 1 | 1 | go | standard | go | go | qsts_short | low | run_full_year_validation | "
+        "| 1 | 1 | go | standard | qsts_short | low | run_full_year_validation | "
         "1.000 | 1.000 | 0.000 | 0.000 | - |"
     ) in summary
     assert "Envelope Comparison" in summary
@@ -1024,9 +1024,9 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
         investor_rows = list(csv.DictReader(handle))
     assert investor_rows[0]["product_decision"] == "go"
     assert investor_rows[0]["selected_policy"] == "standard"
-    assert investor_rows[0]["selected_policy_verdict"] == "go"
-    assert investor_rows[0]["legacy_qsts_verdict"] == "go"
     assert investor_rows[0]["qsts_verdict"] == "go"
+    assert "selected_policy_verdict" not in investor_rows[0]
+    assert "legacy_qsts_verdict" not in investor_rows[0]
     assert investor_rows[0]["validation_level"] == "qsts_short"
     assert investor_rows[0]["decision_confidence"] == "low"
     assert investor_rows[0]["recommended_next_action"] == "run_full_year_validation"
@@ -1071,7 +1071,7 @@ def test_run_qsts_writes_results_summary_and_bus_detail(tmp_path, monkeypatch):
     assert "PTF" in memo
     assert "Contractual Envelope Summary" in memo
     assert (
-        "| 1 | 1 | go | standard | go | 1.000 | 1.000 | "
+        "| 1 | 1 | go | standard | 1.000 | 1.000 | "
         "0.500 | 0.500 | 0.000 | 0.000 | - |"
     ) in memo
     summary = outputs.summary_path.read_text(encoding="utf-8")
@@ -1778,9 +1778,9 @@ def test_qsts_outputs_include_weighted_risk_economics_and_frontier(tmp_path):
         rows = list(csv.DictReader(handle))
     assert rows[0]["product_decision"] == "no-go"
     assert rows[0]["selected_policy"] == "standard"
-    assert rows[0]["selected_policy_verdict"] == "no-go"
-    assert rows[0]["legacy_qsts_verdict"] == "go-with-conditions"
-    assert rows[0]["legacy_qsts_verdict"] == rows[0]["qsts_verdict"]
+    assert rows[0]["qsts_verdict"] == "no-go"
+    assert "selected_policy_verdict" not in rows[0]
+    assert "legacy_qsts_verdict" not in rows[0]
     assert rows[0]["sampled_curtailment_mwh"] == "2.000000"
     assert rows[0]["weighted_curtailment_mwh"] == "2.000000"
     assert rows[0]["curtailment_energy_ratio"] == "0.000046"
@@ -1803,11 +1803,13 @@ def test_qsts_outputs_include_weighted_risk_economics_and_frontier(tmp_path):
     assert "policy_max_energy_ratio" in frontier_rows[0]
     assert "policy_max_event_hours" in frontier_rows[0]
     assert "policy_max_event_mwh_per_mw" in frontier_rows[0]
+    assert "policy_conditional_max_event_mwh_per_mw" in frontier_rows[0]
     standard = next(row for row in frontier_rows if row["policy"] == "standard")
     assert standard["policy_max_p90_ratio"] == "0.100000"
     assert standard["policy_max_energy_ratio"] == "0.010000"
     assert standard["policy_max_event_hours"] == "12"
     assert standard["policy_max_event_mwh_per_mw"] == "1.000000"
+    assert standard["policy_conditional_max_event_mwh_per_mw"] == "2.000000"
     assert frontier_rows[0]["validation_level"] == "qsts_short"
     manifest = json.loads(outputs.run_manifest_path.read_text(encoding="utf-8"))
     assert manifest["outputs"]["qsts_economics"] == "qsts_economics.csv"

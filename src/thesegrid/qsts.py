@@ -541,6 +541,7 @@ def write_qsts_outputs(
                 "policy_max_energy_ratio",
                 "policy_max_event_hours",
                 "policy_max_event_mwh_per_mw",
+                "policy_conditional_max_event_mwh_per_mw",
                 "frontier_verdict",
                 "validation_level",
             ),
@@ -906,8 +907,7 @@ def render_qsts_investment_memo(result: QstsResult) -> str:
         primary = (
             f"Bus {top_bus.bus_id} ({top_bus.bus_name or 'unnamed'}) is the top-ranked "
             f"QSTS candidate with product decision `{product_decision}` under the "
-            f"`{result.request.selected_policy}` policy at {top_bus.requested_mw:.3f} MW. "
-            f"Legacy QSTS verdict: `{top_bus.qsts_verdict}`."
+            f"`{result.request.selected_policy}` policy at {top_bus.requested_mw:.3f} MW."
         )
         contractual_rows = synthesize_contractual_envelope(qsts_envelope_records(result)).rows
         investor_table = _render_qsts_investment_table(result, contractual_rows)

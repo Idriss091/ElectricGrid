@@ -1,6 +1,6 @@
 # France BESS connection context
 
-Thesegrid V1 is scoped to buyer-side pre-feasibility for BESS in France. It helps a
+VoltPath V1 is scoped to buyer-side pre-feasibility for BESS in France. It helps a
 developer or advisor decide whether a site deserves further grid-connection work before
 an official operator study.
 
@@ -8,7 +8,7 @@ an official operator study.
 
 RTE announced storage connection offers with gabarits after a CRE consultation. The
 updated RTE technical reference material for storage gabarits and PTF templates entered
-into force on 2026-02-12. Thesegrid uses this as market context and vocabulary, not as a
+into force on 2026-02-12. VoltPath uses this as market context and vocabulary, not as a
 source of official project-specific limits.
 
 CRE TURPE 7 introduced an optional annual injection-withdrawal component for storage
@@ -22,14 +22,14 @@ official connection offer for a specific project.
 
 ## Product vocabulary
 
-- `PTF`: proposition technique et financiere. Thesegrid output is not a PTF.
+- `PTF`: proposition technique et financiere. VoltPath output is not a PTF.
 - `gabarit injection/soutirage`: direction-specific operating envelope used as a
   pre-feasibility proxy.
 - `capacite d'accueil`: public-context available hosting capacity signal, not a
   guaranteed connection capacity.
 - `zone contrainte`: area where network constraints may justify a gabarit-style
   connection offer.
-- `offre optimisee`: RTE/CRE market context for storage gabarits; Thesegrid only
+- `offre optimisee`: RTE/CRE market context for storage gabarits; VoltPath only
   produces an investor-side approximation.
 
 ## Boundaries

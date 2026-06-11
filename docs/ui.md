@@ -1,8 +1,8 @@
-# Thesegrid Evidence Console
+# VoltPath Evidence Console
 
 ## Purpose
 
-The evidence console is a local Streamlit interface for reading Thesegrid result
+The evidence console is a local Streamlit interface for reading VoltPath result
 artifacts. It is intentionally read-only: QSTS jobs still run through the CLI so long
 simulations remain reproducible and restartable.
 

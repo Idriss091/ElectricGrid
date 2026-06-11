@@ -21,14 +21,14 @@ def main() -> None:
     import streamlit as st
 
     st.set_page_config(
-        page_title="Thesegrid Evidence Console",
+        page_title="VoltPath Evidence Console",
         page_icon=None,
         layout="wide",
         initial_sidebar_state="expanded",
     )
     _inject_css(st)
 
-    st.sidebar.title("Thesegrid")
+    st.sidebar.title("VoltPath")
     root_text = st.sidebar.text_input("Results folder", value=DEFAULT_RESULTS_DIR)
     root = Path(root_text).expanduser()
     bundle = load_result_bundle(root)
@@ -57,7 +57,7 @@ def main() -> None:
         _render_empty_state(st)
         return
     if not bundle.artifacts:
-        st.warning(f"No Thesegrid result artifacts found under: {root}")
+        st.warning(f"No VoltPath result artifacts found under: {root}")
         _render_empty_state(st)
         return
 

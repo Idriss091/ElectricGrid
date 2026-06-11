@@ -10,6 +10,7 @@ class DecisionFrontierPolicy:
     max_energy_ratio: float
     max_event_hours: int
     max_event_mwh_per_mw: float
+    conditional_max_event_mwh_per_mw: float | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ DECISION_FRONTIER_POLICIES = (
         max_energy_ratio=0.01,
         max_event_hours=12,
         max_event_mwh_per_mw=1.0,
+        conditional_max_event_mwh_per_mw=2.0,
     ),
     DecisionFrontierPolicy(
         "flexible",
@@ -94,6 +96,14 @@ def frontier_verdict(
             return "investigate-only"
     if within_policy:
         return "go-with-conditions"
+    if _within_conditional_event_policy(
+        p90_curtailment_ratio=p90_curtailment_ratio,
+        curtailment_energy_ratio=curtailment_energy_ratio,
+        max_event_hours=max_event_hours,
+        max_event_mwh_per_mw=max_event_mwh_per_mw,
+        policy=policy,
+    ):
+        return "go-with-conditions"
     return "no-go"
 
 
@@ -110,6 +120,24 @@ def _within_policy(
         and curtailment_energy_ratio <= policy.max_energy_ratio + 1e-9
         and max_event_hours <= policy.max_event_hours
         and max_event_mwh_per_mw <= policy.max_event_mwh_per_mw + 1e-9
+    )
+
+
+def _within_conditional_event_policy(
+    *,
+    p90_curtailment_ratio: float,
+    curtailment_energy_ratio: float,
+    max_event_hours: int,
+    max_event_mwh_per_mw: float,
+    policy: DecisionFrontierPolicy,
+) -> bool:
+    if policy.conditional_max_event_mwh_per_mw is None:
+        return False
+    return (
+        p90_curtailment_ratio <= policy.max_p90_ratio + 1e-9
+        and curtailment_energy_ratio <= policy.max_energy_ratio + 1e-9
+        and max_event_hours <= policy.max_event_hours
+        and max_event_mwh_per_mw <= policy.conditional_max_event_mwh_per_mw + 1e-9
     )
 
 

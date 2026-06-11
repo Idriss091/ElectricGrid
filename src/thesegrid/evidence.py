@@ -26,9 +26,9 @@ def evidence_profile(
     data_source_type: str,
 ) -> EvidenceProfile:
     if evidence_level not in EVIDENCE_LEVELS:
-        raise ValueError("evidence_level must be a supported Thesegrid evidence level")
+        raise ValueError("evidence_level must be a supported VoltPath evidence level")
     if data_source_type not in DATA_SOURCE_TYPES:
-        raise ValueError("data_source_type must be a supported Thesegrid data source type")
+        raise ValueError("data_source_type must be a supported VoltPath data source type")
 
     return EvidenceProfile(
         evidence_level=evidence_level,  # type: ignore[arg-type]

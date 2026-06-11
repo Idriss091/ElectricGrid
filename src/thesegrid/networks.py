@@ -45,7 +45,7 @@ def _disable_optional_ortools_import() -> Iterator[None]:
     """Make pandapower fall back to scipy instead of importing optional OR-Tools.
 
     Some Python environments abort inside the optional OR-Tools native extension during
-    pandapower import. Thesegrid does not use pandapower's OR-Tools estimation path for
+    pandapower import. VoltPath does not use pandapower's OR-Tools estimation path for
     screening or QSTS, so raising ImportError for that optional module is safer than
     letting the process crash before SimBench can load.
     """

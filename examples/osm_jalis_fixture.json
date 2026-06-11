@@ -1,0 +1,56 @@
+{
+  "GERS-JALIS-01": {
+    "elements": [
+      {
+        "type": "way",
+        "id": 604408491,
+        "center": {
+          "lat": 43.6222012,
+          "lon": 0.587458
+        },
+        "tags": {
+          "power": "substation",
+          "name": "Poste de Jalis",
+          "operator": "RTE",
+          "voltage": "225000;63000;20000"
+        }
+      }
+    ]
+  },
+  "GERS-JALIS-02": {
+    "elements": [
+      {
+        "type": "way",
+        "id": 604408491,
+        "center": {
+          "lat": 43.6222012,
+          "lon": 0.587458
+        },
+        "tags": {
+          "power": "substation",
+          "name": "Poste de Jalis",
+          "operator": "RTE",
+          "voltage": "225000;63000;20000"
+        }
+      }
+    ]
+  },
+  "GERS-JALIS-03": {
+    "elements": [
+      {
+        "type": "way",
+        "id": 604408491,
+        "center": {
+          "lat": 43.6222012,
+          "lon": 0.587458
+        },
+        "tags": {
+          "power": "substation",
+          "name": "Poste de Jalis",
+          "operator": "RTE",
+          "voltage": "225000;63000;20000"
+        }
+      }
+    ]
+  }
+}
