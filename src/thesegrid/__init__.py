@@ -1,6 +1,16 @@
 """Public API for the VoltPath pre-feasibility engine."""
 
 from thesegrid.assessment import assess_connection
+from thesegrid.commercial_reporting import (
+    CommercialValidationOutputs,
+    run_commercial_validation,
+)
+from thesegrid.commercial_validation import (
+    CommercialValidationError,
+    GroundTruthMetrics,
+    InterviewMetrics,
+    PilotMetrics,
+)
 from thesegrid.models import (
     ConnectionRequest,
     CurtailmentEstimate,
@@ -51,12 +61,16 @@ __all__ = [
     "CartostockSchemaError",
     "CartostockSubstation",
     "ConnectionRequest",
+    "CommercialValidationError",
+    "CommercialValidationOutputs",
     "CurtailmentEstimate",
     "EconomicAssumptions",
     "EconomicComparison",
     "EnvelopeOption",
     "FrenchSubstationIdentity",
     "InvestmentMemo",
+    "GroundTruthMetrics",
+    "InterviewMetrics",
     "OdreDataAccessError",
     "OdreSchemaError",
     "OdreSourceManifest",
@@ -70,6 +84,7 @@ __all__ = [
     "PortfolioSite",
     "PortfolioWorkflowRequest",
     "PortfolioWorkflowResult",
+    "PilotMetrics",
     "Rte7000DataAccessError",
     "Rte7000PartitionManifest",
     "Rte7000PartitionRequest",
@@ -87,6 +102,7 @@ __all__ = [
     "normalize_substation_name",
     "read_rte7000_partition",
     "run_qsts",
+    "run_commercial_validation",
     "run_portfolio_workflow",
     "screen_portfolio",
     "screen_connections",

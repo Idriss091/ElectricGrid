@@ -4,6 +4,11 @@ from types import SimpleNamespace
 import thesegrid.cli as cli_module
 from thesegrid import ConnectionRequest, assess_connection
 from thesegrid.cli import main
+from thesegrid.commercial_validation import (
+    GROUND_TRUTH_COLUMNS,
+    INTERVIEW_COLUMNS,
+    PILOT_COLUMNS,
+)
 from thesegrid.memo import render_investment_memo
 from thesegrid.networks import load_network
 
@@ -81,6 +86,8 @@ def test_cli_portfolio_screen_runs_commercial_workflow(monkeypatch, tmp_path):
     storage = tmp_path / "storage.csv"
     regional_loads = tmp_path / "regional_loads.csv"
     eco2mix = tmp_path / "eco2mix.xls"
+    odre_substations = tmp_path / "postes-electriques-rte.csv"
+    manual_reviews = tmp_path / "manual_reviews.csv"
     output = tmp_path / "output"
     captured = {}
 
@@ -119,6 +126,10 @@ def test_cli_portfolio_screen_runs_commercial_workflow(monkeypatch, tmp_path):
             "35",
             "--osm-fixture",
             str(fixture),
+            "--odre-substations",
+            str(odre_substations),
+            "--manual-reviews",
+            str(manual_reviews),
             "--odre-constraints",
             str(constraints),
             "--odre-storage-assets",
@@ -138,7 +149,37 @@ def test_cli_portfolio_screen_runs_commercial_workflow(monkeypatch, tmp_path):
     assert request.rte7000_revision.startswith("1a2419")
     assert request.search_radius_km == 35.0
     assert request.osm_fixture_path == fixture
+    assert request.odre_substations_path == odre_substations
+    assert request.manual_reviews_path == manual_reviews
     assert request.odre_constraints_path == constraints
     assert request.odre_storage_assets_path == storage
     assert request.odre_regional_loads_path == regional_loads
     assert request.eco2mix_annual_path == eco2mix
+
+
+def test_cli_pilot_evaluate_writes_commercial_validation_bundle(tmp_path):
+    interviews = tmp_path / "interviews.csv"
+    pilots = tmp_path / "pilots.csv"
+    ground_truth = tmp_path / "ground_truth.csv"
+    output = tmp_path / "output"
+    interviews.write_text(",".join(INTERVIEW_COLUMNS) + "\n", encoding="utf-8")
+    pilots.write_text(",".join(PILOT_COLUMNS) + "\n", encoding="utf-8")
+    ground_truth.write_text(",".join(GROUND_TRUTH_COLUMNS) + "\n", encoding="utf-8")
+
+    exit_code = main(
+        [
+            "pilot-evaluate",
+            "--interviews",
+            str(interviews),
+            "--pilots",
+            str(pilots),
+            "--ground-truth",
+            str(ground_truth),
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert exit_code == 0
+    assert (output / "commercial_validation_summary.json").exists()
+    assert (output / "commercial_validation_report.md").exists()

@@ -32,6 +32,8 @@ class PortfolioScreeningOutputs:
     report_path: Path
     map_path: Path
     assumption_register_path: Path
+    manual_review_queue_path: Path
+    data_quality_report_path: Path
     manifest_path: Path
 
 
@@ -43,6 +45,7 @@ def write_portfolio_screening_outputs(
     now: Clock | None = None,
 ) -> PortfolioScreeningOutputs:
     output_dir.mkdir(parents=True, exist_ok=True)
+    source_manifest_values = tuple(_json_value(item) for item in source_manifests)
     outputs = PortfolioScreeningOutputs(
         ranked_csv_path=output_dir / "portfolio_ranked.csv",
         candidates_csv_path=output_dir / "candidate_substations.csv",
@@ -54,6 +57,8 @@ def write_portfolio_screening_outputs(
         report_path=output_dir / "portfolio_screening_report.md",
         map_path=output_dir / "portfolio_screening_map.html",
         assumption_register_path=output_dir / "source_assumption_register.json",
+        manual_review_queue_path=output_dir / "manual_review_queue.csv",
+        data_quality_report_path=output_dir / "data_quality_report.json",
         manifest_path=output_dir / "run_manifest.json",
     )
     _write_ranked_csv(result, outputs.ranked_csv_path)
@@ -65,6 +70,7 @@ def write_portfolio_screening_outputs(
         result,
         outputs.site_finder_seed_signals_csv_path,
     )
+    _write_manual_review_queue_csv(result, outputs.manual_review_queue_path)
     outputs.bundle_summary_path.write_text(
         json.dumps(_bundle_summary(result), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
@@ -73,6 +79,15 @@ def write_portfolio_screening_outputs(
     outputs.map_path.write_text(_render_map(result), encoding="utf-8")
     outputs.assumption_register_path.write_text(
         json.dumps(_assumption_register(result), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    outputs.data_quality_report_path.write_text(
+        json.dumps(
+            _data_quality_report(result, source_manifest_values),
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
         encoding="utf-8",
     )
 
@@ -88,7 +103,7 @@ def write_portfolio_screening_outputs(
         "site_count": len(result.ranked_sites),
         "candidate_count": len(result.candidate_assessments),
         "source_errors": dict(result.source_errors),
-        "source_manifests": [_json_value(item) for item in source_manifests],
+        "source_manifests": list(source_manifest_values),
         "outputs": {
             "ranked_portfolio": outputs.ranked_csv_path.name,
             "candidate_substations": outputs.candidates_csv_path.name,
@@ -102,6 +117,8 @@ def write_portfolio_screening_outputs(
             "report": outputs.report_path.name,
             "map": outputs.map_path.name,
             "assumption_register": outputs.assumption_register_path.name,
+            "manual_review_queue": outputs.manual_review_queue_path.name,
+            "data_quality_report": outputs.data_quality_report_path.name,
         },
     }
     outputs.manifest_path.write_text(
@@ -138,6 +155,11 @@ def _write_ranked_csv(result: PortfolioScreeningResult, path: Path) -> None:
         "development_readiness_score",
         "public_grid_evidence_score",
         "deep_dive_recommendation",
+        "manual_review_required",
+        "manual_review_status",
+        "manual_review_reviewer",
+        "manual_reviewed_at_utc",
+        "manual_review_notes",
         "strongest_positive_signals",
         "likely_constraints",
         "missing_evidence",
@@ -199,6 +221,11 @@ def _ranked_row(screening: SiteScreening, policy_version: str) -> dict[str, obje
         "development_readiness_score": dimensions["development_readiness"],
         "public_grid_evidence_score": dimensions.get("public_grid_evidence", 0),
         "deep_dive_recommendation": screening.deep_dive_recommendation,
+        "manual_review_required": screening.manual_review_required,
+        "manual_review_status": screening.manual_review_status,
+        "manual_review_reviewer": screening.manual_review_reviewer,
+        "manual_reviewed_at_utc": screening.manual_reviewed_at_utc,
+        "manual_review_notes": screening.manual_review_notes,
         "strongest_positive_signals": " | ".join(
             screening.strongest_positive_signals
         ),
@@ -286,6 +313,10 @@ def _write_public_grid_evidence_csv(result: PortfolioScreeningResult, path: Path
         "battery_storage_kwh_region",
         "battery_storage_kw_source_substation",
         "latest_regional_load_date",
+        "eco2mix_record_count",
+        "eco2mix_source_interval_minutes",
+        "eco2mix_observed_consumption_count",
+        "eco2mix_missing_consumption_count",
         "eco2mix_coverage_hours",
         "source_completeness_score",
         "missing_evidence",
@@ -319,6 +350,18 @@ def _write_public_grid_evidence_csv(result: PortfolioScreeningResult, path: Path
                         profile.battery_storage_kw_source_substation
                     ),
                     "latest_regional_load_date": profile.latest_regional_load_date,
+                    "eco2mix_record_count": profile.eco2mix_record_count,
+                    "eco2mix_source_interval_minutes": (
+                        ""
+                        if profile.eco2mix_source_interval_minutes is None
+                        else profile.eco2mix_source_interval_minutes
+                    ),
+                    "eco2mix_observed_consumption_count": (
+                        profile.eco2mix_observed_consumption_count
+                    ),
+                    "eco2mix_missing_consumption_count": (
+                        profile.eco2mix_missing_consumption_count
+                    ),
                     "eco2mix_coverage_hours": profile.eco2mix_coverage_hours,
                     "source_completeness_score": profile.source_completeness_score,
                     "missing_evidence": " | ".join(profile.missing_evidence),
@@ -360,6 +403,68 @@ def _write_deep_dive_shortlist_csv(
             }:
                 continue
             writer.writerow(_deep_dive_shortlist_row(screening))
+
+
+def _write_manual_review_queue_csv(
+    result: PortfolioScreeningResult,
+    path: Path,
+) -> None:
+    fieldnames = (
+        "portfolio_rank",
+        "client_site_id",
+        "opportunity_class",
+        "manual_review_required",
+        "manual_review_status",
+        "manual_review_reviewer",
+        "manual_reviewed_at_utc",
+        "manual_review_notes",
+        "candidate_name",
+        "candidate_cartostock_id",
+        "candidate_odre_code",
+        "candidate_rte7000_id",
+        "match_confidence",
+        "next_action",
+    )
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for screening in result.ranked_sites:
+            if not screening.manual_review_required:
+                continue
+            candidate = screening.best_candidate
+            identity = None if candidate is None else candidate.identity
+            writer.writerow(
+                {
+                    "portfolio_rank": screening.portfolio_rank,
+                    "client_site_id": screening.site.client_site_id,
+                    "opportunity_class": screening.opportunity_class,
+                    "manual_review_required": screening.manual_review_required,
+                    "manual_review_status": screening.manual_review_status,
+                    "manual_review_reviewer": screening.manual_review_reviewer,
+                    "manual_reviewed_at_utc": screening.manual_reviewed_at_utc,
+                    "manual_review_notes": screening.manual_review_notes,
+                    "candidate_name": (
+                        "" if candidate is None else candidate.substation.name or ""
+                    ),
+                    "candidate_cartostock_id": (
+                        "" if identity is None else identity.cartostock_id
+                    ),
+                    "candidate_odre_code": (
+                        ""
+                        if identity is None or identity.odre_code is None
+                        else identity.odre_code
+                    ),
+                    "candidate_rte7000_id": (
+                        ""
+                        if identity is None or identity.rte7000_id is None
+                        else identity.rte7000_id
+                    ),
+                    "match_confidence": (
+                        "" if candidate is None else candidate.match_confidence
+                    ),
+                    "next_action": screening.next_action,
+                }
+            )
 
 
 def _deep_dive_shortlist_row(screening: SiteScreening) -> dict[str, object]:
@@ -576,6 +681,11 @@ def _bundle_summary(result: PortfolioScreeningResult) -> dict[str, object]:
             ("recommended", "conditional", "not_recommended"),
         ),
         "deep_dive_shortlist_count": len(shortlist),
+        "pending_class_a_manual_review_count": sum(
+            screening.opportunity_class == "A"
+            and screening.manual_review_status == "pending"
+            for screening in result.ranked_sites
+        ),
         "deep_dive_shortlist_site_ids": [
             screening.site.client_site_id for screening in shortlist
         ],
@@ -631,6 +741,8 @@ def _deep_dive_input_package(
             "evidence_confidence": screening.evidence_confidence,
             "total_score": screening.total_score,
             "next_action": screening.next_action,
+            "manual_review_required": screening.manual_review_required,
+            "manual_review_status": screening.manual_review_status,
         },
         "site": _json_value(screening.site),
         "candidate": _candidate_deep_dive_package(screening.best_candidate),
@@ -643,6 +755,13 @@ def _deep_dive_input_package(
             if screening.best_candidate is None
             else screening.best_candidate.public_evidence
         ),
+        "manual_review": {
+            "required": screening.manual_review_required,
+            "status": screening.manual_review_status,
+            "reviewer": screening.manual_review_reviewer,
+            "reviewed_at_utc": screening.manual_reviewed_at_utc,
+            "notes": screening.manual_review_notes,
+        },
         "manual_validation_checklist": [
             "Confirm canonical RTE/Enedis node and voltage level.",
             "Confirm bay availability and feasible physical route.",
@@ -748,6 +867,30 @@ def _render_report(result: PortfolioScreeningResult) -> str:
                 f"| {screening.portfolio_rank} | {screening.site.client_site_id} | "
                 f"{screening.deep_dive_recommendation} | {screening.opportunity_class} | "
                 f"{screening.total_score} | {screening.next_action} |"
+            )
+
+    lines.extend(["", "## Mandatory Class A Review", ""])
+    class_a = tuple(
+        screening
+        for screening in result.ranked_sites
+        if screening.opportunity_class == "A"
+    )
+    if not class_a:
+        lines.append("No Class A site requires review in this run.")
+    else:
+        lines.extend(
+            [
+                "| Site | Status | Reviewer | Reviewed at | Notes |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        for screening in class_a:
+            lines.append(
+                f"| {screening.site.client_site_id} | "
+                f"{screening.manual_review_status} | "
+                f"{screening.manual_review_reviewer or '-'} | "
+                f"{screening.manual_reviewed_at_utc or '-'} | "
+                f"{screening.manual_review_notes or '-'} |"
             )
 
     lines.extend(
@@ -931,6 +1074,130 @@ def _assumption_register(result: PortfolioScreeningResult) -> dict[str, object]:
             "reserved_grid_capacity",
             "operator_validated_cost_or_delay",
         ],
+    }
+
+
+def _data_quality_report(
+    result: PortfolioScreeningResult,
+    source_manifests: tuple[Any, ...],
+) -> dict[str, object]:
+    manifest_records = tuple(
+        item for item in source_manifests if isinstance(item, Mapping)
+    )
+    class_a = tuple(
+        screening
+        for screening in result.ranked_sites
+        if screening.opportunity_class == "A"
+    )
+    review_counts = _count_values(
+        (screening.manual_review_status for screening in class_a),
+        ("pending", "approved", "rejected"),
+    )
+    evidence_profiles = {
+        (profile.client_site_id, profile.odre_code): profile
+        for candidate in result.candidate_assessments
+        if (profile := candidate.public_evidence) is not None
+    }.values()
+    intervals = sorted(
+        {
+            profile.eco2mix_source_interval_minutes
+            for profile in evidence_profiles
+            if profile.eco2mix_source_interval_minutes is not None
+        }
+    )
+    source_traceability = {
+        "source_count": len(manifest_records),
+        "identified_source_count": sum(
+            bool(
+                item.get("path")
+                or item.get("source_path")
+                or item.get("source_url")
+                or item.get("endpoint")
+                or item.get("repository")
+            )
+            for item in manifest_records
+        ),
+        "dated_source_count": sum(
+            bool(item.get("retrieved_at_utc") or item.get("publication_date"))
+            for item in manifest_records
+        ),
+        "licensed_source_count": sum(
+            bool(item.get("license_name") or item.get("attribution"))
+            for item in manifest_records
+        ),
+        "pinned_or_hashed_source_count": sum(
+            bool(item.get("sha256") or item.get("revision") or item.get("query"))
+            for item in manifest_records
+        ),
+    }
+    source_traceability["complete"] = all(
+        source_traceability[key] == source_traceability["source_count"]
+        for key in (
+            "identified_source_count",
+            "dated_source_count",
+            "licensed_source_count",
+            "pinned_or_hashed_source_count",
+        )
+    )
+    delivery_gate_passed = (
+        review_counts["pending"] == 0 and review_counts["rejected"] == 0
+    )
+    overall_status = (
+        "pass"
+        if not result.source_errors
+        and delivery_gate_passed
+        and source_traceability["complete"]
+        else "attention"
+    )
+    return {
+        "policy_version": result.policy_version,
+        "validation_depth": "geospatial_screening",
+        "overall_status": overall_status,
+        "source_traceability": source_traceability,
+        "source_errors": dict(result.source_errors),
+        "eco2mix": {
+            "profile_count": len(evidence_profiles),
+            "record_count": max(
+                (profile.eco2mix_record_count for profile in evidence_profiles),
+                default=0,
+            ),
+            "source_interval_minutes": intervals,
+            "observed_consumption_count": max(
+                (
+                    profile.eco2mix_observed_consumption_count
+                    for profile in evidence_profiles
+                ),
+                default=0,
+            ),
+            "missing_consumption_count": max(
+                (
+                    profile.eco2mix_missing_consumption_count
+                    for profile in evidence_profiles
+                ),
+                default=0,
+            ),
+            "coverage_hours": max(
+                (profile.eco2mix_coverage_hours for profile in evidence_profiles),
+                default=0.0,
+            ),
+        },
+        "identity": {
+            "candidate_count": len(result.candidate_assessments),
+            "match_confidence_counts": _count_values(
+                (
+                    candidate.match_confidence
+                    for candidate in result.candidate_assessments
+                ),
+                ("exact", "high", "unmatched"),
+            ),
+        },
+        "manual_review": {
+            "class_a_count": len(class_a),
+            "pending_count": review_counts["pending"],
+            "approved_count": review_counts["approved"],
+            "rejected_count": review_counts["rejected"],
+            "delivery_gate_passed": delivery_gate_passed,
+        },
     }
 
 

@@ -67,7 +67,8 @@ def _write_public_evidence_sources(tmp_path):
     eco2mix.write_text(
         "Périmètre\tNature\tDate\tHeures\tConsommation\tSolaire\tEolien\t"
         " Stockage batterie\tDéstockage batterie\n"
-        "Données définitives\t2024-01-01\t00:00\t55000\t54200\t0\t15557\t0\t14976\n",
+        "France\tDonnées définitives\t2024-01-01\t00:00\t55000\t0\t15557\t0\t14976\n"
+        "France\tDonnées définitives\t2024-01-01\t00:15\t\t\t\t\t\n",
         encoding="latin1",
     )
     regional_loads.write_text(
@@ -190,6 +191,56 @@ def test_run_portfolio_workflow_uses_projected_pinned_rte_snapshot_and_writes_bu
     assert result.screening.ranked_sites[0].opportunity_class == "A"
     assert result.outputs.report_path.exists()
     assert result.outputs.manifest_path.exists()
+    manifest = json.loads(result.outputs.manifest_path.read_text(encoding="utf-8"))
+    local_sources = [
+        source
+        for source in manifest["source_manifests"]
+        if "path" in source
+    ]
+    assert local_sources
+    assert all(source["publication_date"] for source in local_sources)
+    assert all(source["retrieved_at_utc"] for source in local_sources)
+    assert all(source["license_name"] for source in local_sources)
+    assert all(source["transformation_version"] for source in local_sources)
+
+
+def test_run_portfolio_workflow_uses_local_odre_identity_snapshot(tmp_path):
+    portfolio_path = tmp_path / "portfolio.csv"
+    cartostock_path = tmp_path / "cartostock.csv"
+    odre_path = tmp_path / "postes-electriques-rte.csv"
+    _write_portfolio(portfolio_path)
+    _write_cartostock(cartostock_path)
+    odre_path.write_text(
+        "Code poste;Nom poste;FONCTION;Etat;Tension (kV);departement\n"
+        ".ALPH;ALPHA;Poste;EN EXPLOITATION;225kV;Paris\n",
+        encoding="utf-8-sig",
+    )
+
+    def unexpected_remote_loader():
+        raise AssertionError("remote ODRE loader must not run")
+
+    result = run_portfolio_workflow(
+        PortfolioWorkflowRequest(
+            portfolio_path=portfolio_path,
+            cartostock_path=cartostock_path,
+            output_dir=tmp_path / "output",
+            rte7000_revision="1a2419a6f8a81ab212af035e811d4b893d7c4ccf",
+            odre_substations_path=odre_path,
+        ),
+        odre_loader=unexpected_remote_loader,
+        rte_reader=_rte_result,
+        osm_discoverer=_osm_result,
+    )
+
+    manifest = json.loads(result.outputs.manifest_path.read_text(encoding="utf-8"))
+    identity_sources = [
+        source
+        for source in manifest["source_manifests"]
+        if source.get("transformation_version") == "odre-substations-v1"
+    ]
+    assert len(identity_sources) == 1
+    assert identity_sources[0]["source_path"] == str(odre_path)
+    assert len(identity_sources[0]["sha256"]) == 64
 
 
 def test_run_portfolio_workflow_enriches_ranking_with_local_public_evidence(tmp_path):
@@ -222,8 +273,18 @@ def test_run_portfolio_workflow_enriches_ranking_with_local_public_evidence(tmp_
     assert candidate.public_evidence.region == "BRETAGNE"
     assert candidate.public_evidence.latest_regional_load_date == "2026-06-09"
     assert candidate.public_evidence.missing_evidence == ()
-    assert result.screening.ranked_sites[0].deep_dive_recommendation == "recommended"
+    assert result.screening.ranked_sites[0].manual_review_status == "pending"
+    assert result.screening.ranked_sites[0].deep_dive_recommendation == "conditional"
     assert result.outputs.public_grid_evidence_csv_path.exists()
+    manifest = json.loads(result.outputs.manifest_path.read_text(encoding="utf-8"))
+    eco2mix_sources = [
+        source
+        for source in manifest["source_manifests"]
+        if source.get("source_type") == "eco2mix_annual"
+    ]
+    assert eco2mix_sources[0]["row_count"] == 2
+    assert eco2mix_sources[0]["quality"]["source_interval_minutes"] == 15
+    assert eco2mix_sources[0]["quality"]["missing_consumption_count"] == 1
 
 
 def test_run_portfolio_workflow_keeps_site_visible_when_osm_source_fails(tmp_path):

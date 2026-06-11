@@ -76,7 +76,15 @@ def read_regional_constraints(path: Path) -> OdreTable:
     )
     return OdreTable(
         frame=normalized,
-        manifest=local_source_manifest(path, "odre_regional_constraints"),
+        manifest=local_source_manifest(
+            path,
+            "odre_regional_constraints",
+            row_count=len(normalized),
+            quality={
+                "row_count": len(normalized),
+                "missing_max_power_count": int(normalized["max_power_mw"].isna().sum()),
+            },
+        ),
     )
 
 
@@ -101,7 +109,15 @@ def read_storage_assets(path: Path) -> OdreTable:
     normalized["is_battery"] = (storage_type.str.upper() == "BATTE").map(bool).astype(object)
     return OdreTable(
         frame=normalized,
-        manifest=local_source_manifest(path, "odre_storage_assets"),
+        manifest=local_source_manifest(
+            path,
+            "odre_storage_assets",
+            row_count=len(normalized),
+            quality={
+                "row_count": len(normalized),
+                "battery_row_count": int(normalized["is_battery"].map(bool).sum()),
+            },
+        ),
     )
 
 
@@ -125,12 +141,25 @@ def read_regional_load_profiles(path: Path) -> OdreTable:
             "withdrawal_point_count": _numeric_series(frame["Nb points de soutirage"]),
             "daily_energy_mwh": _numeric_series(frame["Energie journalière (MWh)"]),
             "quality": _text_series(frame["Qualité"]),
-            "max_half_hour_mw": half_hour_values.max(axis=1).fillna(0.0),
+            "max_half_hour_mw": half_hour_values.max(axis=1),
         }
     )
     return OdreTable(
         frame=normalized,
-        manifest=local_source_manifest(path, "odre_regional_load_profiles"),
+        manifest=local_source_manifest(
+            path,
+            "odre_regional_load_profiles",
+            row_count=len(normalized),
+            quality={
+                "row_count": len(normalized),
+                "missing_daily_energy_count": int(
+                    normalized["daily_energy_mwh"].isna().sum()
+                ),
+                "missing_half_hour_profile_count": int(
+                    normalized["max_half_hour_mw"].isna().sum()
+                ),
+            },
+        ),
     )
 
 
@@ -152,4 +181,4 @@ def _numeric_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(
         series.astype(str).str.replace(",", ".", regex=False),
         errors="coerce",
-    ).fillna(0.0)
+    )

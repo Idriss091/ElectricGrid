@@ -4,6 +4,7 @@ from dataclasses import replace
 
 from thesegrid.osm_substations import OsmSubstation
 from thesegrid.portfolio_input import PortfolioSite
+from thesegrid.portfolio_review import ManualReview
 from thesegrid.public_data.evidence import PublicGridEvidenceProfile
 from thesegrid.portfolio_screening import (
     PORTFOLIO_SCREENING_POLICY_VERSION,
@@ -113,7 +114,8 @@ def test_screen_portfolio_emits_six_explainable_dimensions_and_class_a_gate():
     )
 
     screened = result.ranked_sites[0]
-    assert result.policy_version == PORTFOLIO_SCREENING_POLICY_VERSION
+    assert result.policy_version == "portfolio-geospatial-v1"
+    assert PORTFOLIO_SCREENING_POLICY_VERSION == "portfolio-geospatial-v1"
     assert screened.total_score == 100
     assert [dimension.name for dimension in screened.dimensions] == [
         "connection_practicality",
@@ -128,7 +130,8 @@ def test_screen_portfolio_emits_six_explainable_dimensions_and_class_a_gate():
     assert screened.evidence_confidence == "high"
     assert screened.best_candidate is not None
     assert screened.best_candidate.identity is not None
-    assert screened.next_action.startswith("Launch Deep Dive")
+    assert screened.manual_review_status == "pending"
+    assert screened.next_action.startswith("Complete mandatory manual review")
 
 
 def test_screen_portfolio_uses_public_grid_evidence_for_score_and_deep_dive_trigger():
@@ -162,11 +165,122 @@ def test_screen_portfolio_uses_public_grid_evidence_for_score_and_deep_dive_trig
     assert screened.best_candidate.public_evidence == public_evidence
     assert [dimension.name for dimension in screened.dimensions][-1] == "public_grid_evidence"
     assert screened.dimensions[-1].points == 10
-    assert screened.deep_dive_recommendation == "recommended"
+    assert screened.manual_review_required is True
+    assert screened.manual_review_status == "pending"
+    assert screened.deep_dive_recommendation == "conditional"
     assert any(
         "ODRE/ECO2MIX public evidence is complete" in signal
         for signal in screened.strongest_positive_signals
     )
+
+
+def test_approved_class_a_review_allows_recommended_deep_dive():
+    site = _site("SITE-APPROVED")
+    public_evidence = PublicGridEvidenceProfile(
+        client_site_id="SITE-APPROVED",
+        region="BRETAGNE",
+        odre_code=".ALPH",
+        regional_constraint_count=1,
+        dominant_constraint_occurrence="Forte",
+        dominant_constraint_duration="]2h-4h]",
+        high_persistence_constraint_count=1,
+        battery_storage_kw_region=0.0,
+        battery_storage_kwh_region=0.0,
+        battery_storage_kw_source_substation=0.0,
+        latest_regional_load_date="2026-06-09",
+        eco2mix_coverage_hours=8784.0,
+        source_completeness_score=1.0,
+        missing_evidence=(),
+    )
+    review = ManualReview(
+        client_site_id="SITE-APPROVED",
+        status="approved",
+        reviewer="A. Expert",
+        reviewed_at_utc="2026-06-11T12:00:00+00:00",
+        notes="Canonical identity checked.",
+    )
+
+    result = screen_portfolio(
+        (site,),
+        {"SITE-APPROVED": (_link(),)},
+        (_cartostock(),),
+        public_evidence_profiles=(public_evidence,),
+        manual_reviews={"SITE-APPROVED": review},
+    )
+
+    screened = result.ranked_sites[0]
+    assert screened.manual_review_status == "approved"
+    assert screened.manual_review_reviewer == "A. Expert"
+    assert screened.deep_dive_recommendation == "recommended"
+
+
+def test_rejected_class_a_review_prevents_deep_dive_shortlisting():
+    site = _site("SITE-REJECTED")
+    review = ManualReview(
+        client_site_id="SITE-REJECTED",
+        status="rejected",
+        reviewer="A. Expert",
+        reviewed_at_utc="2026-06-11T12:00:00+00:00",
+        notes="OSM voltage conflicts with the canonical node.",
+    )
+
+    result = screen_portfolio(
+        (site,),
+        {"SITE-REJECTED": (_link(),)},
+        (_cartostock(),),
+        manual_reviews={"SITE-REJECTED": review},
+    )
+
+    screened = result.ranked_sites[0]
+    assert screened.opportunity_class == "A"
+    assert screened.manual_review_status == "rejected"
+    assert screened.deep_dive_recommendation == "not_recommended"
+    assert "manual review rejected" in screened.next_action
+
+
+def test_public_evidence_score_does_not_reward_existing_battery_capacity():
+    site = _site("SITE-STORAGE")
+    evidence_without_storage = PublicGridEvidenceProfile(
+        client_site_id="SITE-STORAGE",
+        region="BRETAGNE",
+        odre_code=".ALPH",
+        regional_constraint_count=0,
+        dominant_constraint_occurrence="",
+        dominant_constraint_duration="",
+        high_persistence_constraint_count=0,
+        battery_storage_kw_region=0.0,
+        battery_storage_kwh_region=0.0,
+        battery_storage_kw_source_substation=0.0,
+        latest_regional_load_date="",
+        eco2mix_coverage_hours=0,
+        source_completeness_score=0.5,
+        missing_evidence=("regional_constraints", "regional_load_profiles"),
+    )
+    evidence_with_storage = replace(
+        evidence_without_storage,
+        battery_storage_kw_region=100_000.0,
+        battery_storage_kwh_region=200_000.0,
+        battery_storage_kw_source_substation=50_000.0,
+    )
+
+    without_storage = screen_portfolio(
+        (site,),
+        {"SITE-STORAGE": (_link(),)},
+        (_cartostock(),),
+        public_evidence_profiles=(evidence_without_storage,),
+    )
+    with_storage = screen_portfolio(
+        (site,),
+        {"SITE-STORAGE": (_link(),)},
+        (_cartostock(),),
+        public_evidence_profiles=(evidence_with_storage,),
+    )
+
+    without_dimension = without_storage.ranked_sites[0].dimensions[-1]
+    with_dimension = with_storage.ranked_sites[0].dimensions[-1]
+    assert without_dimension.name == "public_grid_evidence"
+    assert without_dimension.points == with_dimension.points
+    assert "not scored as connection capacity evidence" in with_dimension.reason
 
 
 def test_screen_portfolio_requires_rte7000_link_for_class_a():

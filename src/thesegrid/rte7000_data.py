@@ -77,6 +77,10 @@ class Rte7000PartitionManifest:
     source_type: str
     row_count: int
     retrieved_at_utc: str
+    publisher: str = "OpenSynth"
+    source_url: str = "https://huggingface.co/datasets/OpenSynth/rte7000"
+    license_name: str = "CDLA-Permissive-2.0"
+    transformation_version: str = "rte7000-projected-partition-v1"
 
 
 @dataclass(frozen=True)

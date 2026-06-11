@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from thesegrid.osm_substations import OsmSourceManifest, OsmSubstation
 from thesegrid.portfolio_input import PortfolioSite
+from thesegrid.portfolio_review import ManualReview
 from thesegrid.portfolio_reporting import write_portfolio_screening_outputs
 from thesegrid.portfolio_screening import screen_portfolio
 from thesegrid.public_data.evidence import PublicGridEvidenceProfile
@@ -93,15 +94,28 @@ def _screening_result():
         battery_storage_kwh_region=3000.0,
         battery_storage_kw_source_substation=1200.0,
         latest_regional_load_date="2026-06-09",
-        eco2mix_coverage_hours=35136,
+        eco2mix_coverage_hours=8784.0,
         source_completeness_score=1.0,
         missing_evidence=(),
+        eco2mix_record_count=35136,
+        eco2mix_source_interval_minutes=15,
+        eco2mix_observed_consumption_count=17568,
+        eco2mix_missing_consumption_count=17568,
     )
     return screen_portfolio(
         (site,),
         {"SITE-CLIENT-01": (link,)},
         (cartostock,),
         public_evidence_profiles=(public_evidence,),
+        manual_reviews={
+            "SITE-CLIENT-01": ManualReview(
+                client_site_id="SITE-CLIENT-01",
+                status="approved",
+                reviewer="A. Expert",
+                reviewed_at_utc="2026-06-11T11:00:00+00:00",
+                notes="Identity and voltage checked.",
+            )
+        },
     )
 
 
@@ -135,6 +149,8 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     assert outputs.report_path.exists()
     assert outputs.map_path.exists()
     assert outputs.assumption_register_path.exists()
+    assert outputs.manual_review_queue_path.exists()
+    assert outputs.data_quality_report_path.exists()
     assert outputs.manifest_path.exists()
 
     with outputs.ranked_csv_path.open(newline="", encoding="utf-8") as handle:
@@ -145,6 +161,9 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     assert rows[0]["candidate_rte7000_id"] == ".ALPH"
     assert rows[0]["public_grid_evidence_score"] == "10"
     assert rows[0]["deep_dive_recommendation"] == "recommended"
+    assert rows[0]["manual_review_required"] == "True"
+    assert rows[0]["manual_review_status"] == "approved"
+    assert rows[0]["manual_review_reviewer"] == "A. Expert"
     assert rows[0]["validation_depth"] == "geospatial_screening"
 
     with outputs.public_grid_evidence_csv_path.open(newline="", encoding="utf-8") as handle:
@@ -152,6 +171,11 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     assert evidence_rows[0]["client_site_id"] == "SITE-CLIENT-01"
     assert evidence_rows[0]["region"] == "BRETAGNE"
     assert evidence_rows[0]["battery_storage_kw_region"] == "1500.0"
+    assert evidence_rows[0]["eco2mix_record_count"] == "35136"
+    assert evidence_rows[0]["eco2mix_source_interval_minutes"] == "15"
+    assert evidence_rows[0]["eco2mix_observed_consumption_count"] == "17568"
+    assert evidence_rows[0]["eco2mix_missing_consumption_count"] == "17568"
+    assert evidence_rows[0]["eco2mix_coverage_hours"] == "8784.0"
 
     with outputs.deep_dive_shortlist_csv_path.open(
         newline="", encoding="utf-8"
@@ -172,6 +196,8 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     assert deep_dive_package["package_type"] == "deep_dive_site_input"
     assert deep_dive_package["client_site_id"] == "SITE-CLIENT-01"
     assert deep_dive_package["screening"]["deep_dive_recommendation"] == "recommended"
+    assert deep_dive_package["screening"]["manual_review_status"] == "approved"
+    assert deep_dive_package["manual_review"]["reviewer"] == "A. Expert"
     assert deep_dive_package["site"]["requested_mw"] == 50.0
     assert deep_dive_package["candidate"]["rte7000_id"] == ".ALPH"
     assert deep_dive_package["candidate"]["odre_code"] == ".ALPH"
@@ -206,6 +232,7 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     }
     assert bundle_summary["deep_dive_recommendation_counts"]["recommended"] == 1
     assert bundle_summary["deep_dive_shortlist_count"] == 1
+    assert bundle_summary["pending_class_a_manual_review_count"] == 0
     assert bundle_summary["top_ranked_site"]["client_site_id"] == "SITE-CLIENT-01"
 
     with outputs.candidates_csv_path.open(newline="", encoding="utf-8") as handle:
@@ -214,10 +241,18 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     assert candidate_rows[0]["cartostock_id"] == "ALPHA7"
     assert candidate_rows[0]["distance_km"] == "1.33"
 
+    with outputs.manual_review_queue_path.open(newline="", encoding="utf-8") as handle:
+        review_rows = list(csv.DictReader(handle))
+    assert len(review_rows) == 1
+    assert review_rows[0]["client_site_id"] == "SITE-CLIENT-01"
+    assert review_rows[0]["manual_review_status"] == "approved"
+
     report = outputs.report_path.read_text(encoding="utf-8")
     assert "# VoltPath - Portfolio Screening" in report
     assert "SITE-CLIENT-01" in report
     assert "Recommended Deep Dive Shortlist" in report
+    assert "Mandatory Class A Review" in report
+    assert "approved" in report
     assert "ODRE and ECO2MIX are public-context evidence" in report
     assert "pré-faisabilité côté acheteur" in report
     assert "ne remplace pas une étude officielle" in report
@@ -235,6 +270,20 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
     assert assumptions["sources"]["openstreetmap"]["role"] == "geographic_context"
     assert assumptions["prohibited_claims"][0] == "guaranteed_connection_capacity"
 
+    quality = json.loads(outputs.data_quality_report_path.read_text(encoding="utf-8"))
+    assert quality["policy_version"] == "portfolio-geospatial-v1"
+    assert quality["overall_status"] == "pass"
+    assert quality["eco2mix"]["record_count"] == 35136
+    assert quality["eco2mix"]["source_interval_minutes"] == [15]
+    assert quality["eco2mix"]["observed_consumption_count"] == 17568
+    assert quality["eco2mix"]["missing_consumption_count"] == 17568
+    assert quality["identity"]["match_confidence_counts"]["exact"] == 1
+    assert quality["manual_review"]["class_a_count"] == 1
+    assert quality["manual_review"]["approved_count"] == 1
+    assert quality["manual_review"]["pending_count"] == 0
+    assert quality["manual_review"]["delivery_gate_passed"] is True
+    assert quality["source_traceability"]["source_count"] == 1
+
     manifest = json.loads(outputs.manifest_path.read_text(encoding="utf-8"))
     assert manifest["policy_version"] == result.policy_version
     assert manifest["created_at_utc"] == "2026-06-11T12:00:00+00:00"
@@ -248,3 +297,5 @@ def test_write_portfolio_screening_outputs_creates_complete_client_bundle(tmp_pa
         == "site_finder_seed_signals.csv"
     )
     assert manifest["outputs"]["bundle_summary"] == "portfolio_bundle_summary.json"
+    assert manifest["outputs"]["manual_review_queue"] == "manual_review_queue.csv"
+    assert manifest["outputs"]["data_quality_report"] == "data_quality_report.json"

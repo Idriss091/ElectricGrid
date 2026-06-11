@@ -8,7 +8,7 @@
 - ODRE substation identity data;
 - a remotely projected and timestamp-filtered RTE7000 `sub` partition;
 - bounded OpenStreetMap/Overpass substation queries;
-- the versioned `portfolio-geospatial-v0` policy.
+- the versioned `portfolio-geospatial-v1` policy.
 
 The command produces development priorities, not connection-capacity guarantees. It does
 not run PyPowSyBl or issue a `go` verdict. Those deeper calculations belong to a selected
@@ -46,6 +46,7 @@ PYTHONPATH=src python -m thesegrid.cli portfolio-screen \
   --rte7000-month 1 \
   --rte7000-snapshot 2023-01-01T00:00:00 \
   --search-radius-km 50 \
+  --odre-substations ODRE/postes-electriques-rte.csv \
   --odre-constraints ODRE/contraintes-region.csv \
   --odre-storage-assets ODRE/registre-national-installation-production-stockage-electricite-agrege.csv \
   --odre-regional-loads ODRE/soutirages-regionaux-quotidiens-provisoires-rpt.csv \
@@ -60,6 +61,11 @@ The RTE7000 reader requests only:
 
 It does not clone or download the complete dataset.
 
+`--odre-substations` pins identity matching to a local ODRE snapshot. The exact file
+hash, file date, read date, publisher, licence, and transformation version are recorded
+in the run manifest. Omitting the option still permits the live ODRE export, but that
+mode is less reproducible.
+
 ## Reproducible Demo
 
 The OSM fixture avoids live Overpass variability while retaining the production parser:
@@ -70,6 +76,7 @@ PYTHONPATH=src python -m thesegrid.cli portfolio-screen \
   --cartostock cartostock/postes_cartostock.csv \
   --output results/portfolio-screening-demo \
   --rte7000-revision 1a2419a6f8a81ab212af035e811d4b893d7c4ccf \
+  --odre-substations ODRE/postes-electriques-rte.csv \
   --osm-fixture examples/osm_jalis_fixture.json
 ```
 
@@ -86,6 +93,33 @@ public-context evidence:
 
 These signals improve prioritization and Deep Dive shortlisting. They are not nodal
 measurements, reserved capacity, or official connection feasibility.
+
+ECO2MIX annual exports are interpreted at their actual timestamp cadence. The normalized
+data distinguishes:
+
+- source records, usually at a 15-minute cadence;
+- observed consumption measurements;
+- forecast-only or otherwise missing measurement rows;
+- covered hours computed from records multiplied by cadence.
+
+Missing measurements remain null. They are never silently converted to zero.
+
+## Mandatory Class A Review
+
+Every Class A result requires human review before it can become a `recommended` Deep
+Dive. Without a review file it remains `conditional` and appears in
+`manual_review_queue.csv`.
+
+An optional review CSV uses:
+
+```text
+client_site_id,status,reviewer,reviewed_at_utc,notes
+SITE-01,approved,A. Expert,2026-06-11T12:00:00+00:00,Identity and voltage checked
+SITE-02,rejected,A. Expert,2026-06-11T12:15:00+00:00,Voltage conflict
+```
+
+Pass it with `--manual-reviews path/to/manual_reviews.csv`. Accepted statuses are
+`approved` and `rejected`; reviewer and timezone-aware review timestamp are mandatory.
 
 ## Outputs
 
@@ -105,6 +139,9 @@ measurements, reserved capacity, or official connection feasibility.
 - `portfolio_screening_report.md`: executive shortlist and detailed rationale;
 - `portfolio_screening_map.html`: standalone relative-location map;
 - `source_assumption_register.json`: source roles, assumptions, and prohibited claims;
+- `manual_review_queue.csv`: Class A review status and evidence needed before approval;
+- `data_quality_report.json`: source traceability, ECO2MIX cadence and missingness,
+  identity confidence, source errors, and Class A delivery gate;
 - `run_manifest.json`: policy, timestamps, source revisions, hashes, errors, and outputs.
 
 ## Interpretation
@@ -115,6 +152,7 @@ measurements, reserved capacity, or official connection feasibility.
 - `D / reject`: no candidate or candidate outside the client's practical limit.
 
 Class A requires both a deterministic canonical identity and an RTE7000 topology link.
+It also remains conditional until the mandatory human review is approved.
 No numerical score is a probability of successful connection.
 
 `deep_dive_recommendation` is a shortlist trigger:
@@ -135,6 +173,8 @@ generate prospecting zones, land parcels, or new site recommendations.
 
 - OSM voltage values are interpreted according to the OSM convention: volts without a
   unit, with semicolon-separated levels.
+- Existing batteries in a region or at a source substation remain contextual evidence
+  and contribute no scoring points under `portfolio-geospatial-v1`.
 - Geographic distance is straight-line distance, not a cable route or land-access study.
 - Cartostock gabarits are indicative injection signals and may not describe a symmetric
   BESS operating envelope.

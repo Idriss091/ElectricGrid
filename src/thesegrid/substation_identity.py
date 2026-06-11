@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import re
 import unicodedata
 from collections import defaultdict
@@ -105,6 +106,14 @@ class OdreSourceManifest:
     source_type: str
     row_count: int
     retrieved_at_utc: str
+    source_path: str = ""
+    sha256: str = ""
+    publisher: str = "RTE / ODRÉ"
+    license_name: str = "Licence Ouverte 2.0"
+    publication_date: str = ""
+    publication_date_basis: str = "not_exposed_by_export"
+    file_modified_at_utc: str = ""
+    transformation_version: str = "odre-substations-v1"
 
 
 @dataclass(frozen=True)
@@ -177,21 +186,50 @@ def load_cartostock_substations(source: CsvSource) -> tuple[CartostockSubstation
 
 def load_odre_substations(
     *,
+    source_path: Path | None = None,
     source_url: str = ODRE_SUBSTATIONS_CSV_URL,
     fetcher: ByteFetcher | None = None,
     now: Clock | None = None,
 ) -> OdreSubstationResult:
-    fetch = fetcher or _fetch_bytes
-    try:
-        payload = fetch(source_url)
-    except Exception as exc:
-        raise OdreDataAccessError(f"failed to retrieve ODRE substations from {source_url}: {exc}") from exc
+    if source_path is None:
+        fetch = fetcher or _fetch_bytes
+        try:
+            payload = fetch(source_url)
+        except Exception as exc:
+            raise OdreDataAccessError(
+                f"failed to retrieve ODRE substations from {source_url}: {exc}"
+            ) from exc
+        source_path_text = ""
+        file_modified_at = ""
+        publication_date = ""
+        publication_date_basis = "not_exposed_by_export"
+    else:
+        try:
+            payload = source_path.read_bytes()
+        except OSError as exc:
+            raise OdreDataAccessError(
+                f"failed to read ODRE substation snapshot {source_path}: {exc}"
+            ) from exc
+        modified_at = datetime.fromtimestamp(source_path.stat().st_mtime, tz=UTC)
+        source_path_text = str(source_path)
+        file_modified_at = modified_at.isoformat()
+        publication_date = modified_at.date().isoformat()
+        publication_date_basis = "local_file_modified_at"
 
     frame = pd.read_csv(
         io.BytesIO(payload),
         sep=";",
         dtype=str,
         keep_default_na=False,
+    )
+    frame = frame.rename(
+        columns={
+            "Code poste": "code_poste",
+            "Nom poste": "nom_poste",
+            "FONCTION": "fonction",
+            "Etat": "etat",
+            "Tension (kV)": "tension",
+        }
     )
     _require_columns(frame, ODRE_REQUIRED_COLUMNS, OdreSchemaError, "ODRE")
 
@@ -224,6 +262,11 @@ def load_odre_substations(
             source_type="public_signal",
             row_count=len(substations),
             retrieved_at_utc=retrieved_at.isoformat(),
+            source_path=source_path_text,
+            sha256=hashlib.sha256(payload).hexdigest(),
+            publication_date=publication_date,
+            publication_date_basis=publication_date_basis,
+            file_modified_at_utc=file_modified_at,
         ),
     )
 

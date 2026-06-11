@@ -88,6 +88,21 @@ The V1 includes two CRE/RTE-inspired ex-ante horo-seasonal calendars:
 These calendars are modeled as half-open hourly intervals: 10:00 is restricted,
 18:00 is not; 07:00 is restricted, 13:00 is not; 17:00 is restricted, 21:00 is not.
 
+## V2 public-data screening
+
+- ECO2MIX timestamps are built from the published `Date` and `Heures` columns.
+- `Consommation` is the consumption measurement; `Heures` is never treated as power.
+- Quarter-hour records with absent measurements remain null and are counted separately
+  from observed zero values.
+- Local public sources record their exact hash, file date, read date, publisher,
+  licence, and transformation version.
+- The ODRE identity snapshot can be pinned locally; a live mutable export is not
+  considered equivalent evidence for reproducibility.
+- `portfolio-geospatial-v1` scores public-source completeness but gives no points for
+  the presence of existing regional or source-substation batteries.
+- Every Class A portfolio result requires a dated human review before a Deep Dive can be
+  marked `recommended`.
+
 ## Economics
 
 - The economic layer uses configurable proxy values.

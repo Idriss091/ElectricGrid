@@ -115,6 +115,10 @@ def test_read_partition_projects_columns_filters_rows_and_records_provenance():
     assert result.manifest.source_type == "public_reconstruction"
     assert result.manifest.row_count == 2
     assert result.manifest.retrieved_at_utc == "2026-06-11T12:30:00+00:00"
+    assert result.manifest.publisher == "OpenSynth"
+    assert result.manifest.source_url.endswith("/OpenSynth/rte7000")
+    assert result.manifest.license_name == "CDLA-Permissive-2.0"
+    assert result.manifest.transformation_version == "rte7000-projected-partition-v1"
 
 
 def test_read_partition_rejects_schema_drift():

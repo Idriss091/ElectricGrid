@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +21,7 @@ from thesegrid.osm_substations import (
     discover_osm_substations,
 )
 from thesegrid.portfolio_input import load_portfolio_sites
+from thesegrid.portfolio_review import load_manual_reviews
 from thesegrid.portfolio_reporting import (
     PortfolioScreeningOutputs,
     write_portfolio_screening_outputs,
@@ -58,6 +58,8 @@ class PortfolioWorkflowRequest:
     rte7000_snapshot: str = "2023-01-01T00:00:00"
     search_radius_km: float = 50.0
     osm_fixture_path: Path | None = None
+    odre_substations_path: Path | None = None
+    manual_reviews_path: Path | None = None
     odre_constraints_path: Path | None = None
     odre_storage_assets_path: Path | None = None
     odre_regional_loads_path: Path | None = None
@@ -75,6 +77,12 @@ class PortfolioWorkflowResult:
     outputs: PortfolioScreeningOutputs
 
 
+@dataclass(frozen=True)
+class PublicEvidenceBundle:
+    profiles: tuple[PublicGridEvidenceProfile, ...]
+    manifests: tuple[object, ...]
+
+
 def run_portfolio_workflow(
     request: PortfolioWorkflowRequest,
     *,
@@ -85,7 +93,11 @@ def run_portfolio_workflow(
 ) -> PortfolioWorkflowResult:
     sites = load_portfolio_sites(request.portfolio_path)
     cartostock = load_cartostock_substations(request.cartostock_path)
-    odre_result = odre_loader()
+    odre_result = (
+        odre_loader()
+        if request.odre_substations_path is None
+        else load_odre_substations(source_path=request.odre_substations_path)
+    )
     rte_result = rte_reader(
         Rte7000PartitionRequest(
             component="sub",
@@ -139,14 +151,17 @@ def run_portfolio_workflow(
             for substation in osm_result.substations
         )
 
+    public_evidence = _load_public_evidence_bundle(request, links_by_site)
     screening = screen_portfolio(
         sites,
         links_by_site,
         cartostock,
         source_errors=source_errors,
-        public_evidence_profiles=_public_evidence_profiles(
-            request,
-            links_by_site,
+        public_evidence_profiles=public_evidence.profiles,
+        manual_reviews=(
+            {}
+            if request.manual_reviews_path is None
+            else load_manual_reviews(request.manual_reviews_path)
         ),
     )
     source_manifests = (
@@ -162,9 +177,19 @@ def run_portfolio_workflow(
                 ),
             )
         ),
+        *(
+            ()
+            if request.manual_reviews_path is None
+            else (
+                _local_file_manifest(
+                    request.manual_reviews_path,
+                    "portfolio_manual_reviews",
+                ),
+            )
+        ),
         odre_result.manifest,
         rte_result.manifest,
-        *_public_source_manifests(request),
+        *public_evidence.manifests,
         *osm_manifests,
     )
     outputs = write_portfolio_screening_outputs(
@@ -176,38 +201,74 @@ def run_portfolio_workflow(
     return PortfolioWorkflowResult(screening=screening, outputs=outputs)
 
 
-def _public_evidence_profiles(
+def _load_public_evidence_bundle(
     request: PortfolioWorkflowRequest,
     links_by_site: dict[str, tuple[object, ...]],
-) -> tuple[PublicGridEvidenceProfile, ...]:
+) -> PublicEvidenceBundle:
     if (
         request.odre_constraints_path is None
         and request.odre_storage_assets_path is None
         and request.odre_regional_loads_path is None
         and request.eco2mix_annual_path is None
     ):
-        return ()
-    constraints = (
-        None
-        if request.odre_constraints_path is None or not request.odre_constraints_path.exists()
-        else read_regional_constraints(request.odre_constraints_path).frame
-    )
-    storage = (
-        None
-        if request.odre_storage_assets_path is None or not request.odre_storage_assets_path.exists()
-        else read_storage_assets(request.odre_storage_assets_path).frame
-    )
-    eco2mix = (
-        None
-        if request.eco2mix_annual_path is None or not request.eco2mix_annual_path.exists()
-        else read_eco2mix_annual(request.eco2mix_annual_path).frame
-    )
-    regional_loads = (
-        None
-        if request.odre_regional_loads_path is None
-        or not request.odre_regional_loads_path.exists()
-        else read_regional_load_profiles(request.odre_regional_loads_path).frame
-    )
+        return PublicEvidenceBundle((), ())
+    manifests: list[object] = []
+
+    constraints = None
+    if request.odre_constraints_path is not None:
+        if request.odre_constraints_path.exists():
+            table = read_regional_constraints(request.odre_constraints_path)
+            constraints = table.frame
+            manifests.append(table.manifest)
+        else:
+            manifests.append(
+                local_source_manifest(
+                    request.odre_constraints_path,
+                    "odre_regional_constraints",
+                )
+            )
+
+    storage = None
+    if request.odre_storage_assets_path is not None:
+        if request.odre_storage_assets_path.exists():
+            table = read_storage_assets(request.odre_storage_assets_path)
+            storage = table.frame
+            manifests.append(table.manifest)
+        else:
+            manifests.append(
+                local_source_manifest(
+                    request.odre_storage_assets_path,
+                    "odre_storage_assets",
+                )
+            )
+
+    eco2mix = None
+    if request.eco2mix_annual_path is not None:
+        if request.eco2mix_annual_path.exists():
+            table = read_eco2mix_annual(request.eco2mix_annual_path)
+            eco2mix = table.frame
+            manifests.append(table.manifest)
+        else:
+            manifests.append(
+                local_source_manifest(
+                    request.eco2mix_annual_path,
+                    "eco2mix_annual",
+                )
+            )
+
+    regional_loads = None
+    if request.odre_regional_loads_path is not None:
+        if request.odre_regional_loads_path.exists():
+            table = read_regional_load_profiles(request.odre_regional_loads_path)
+            regional_loads = table.frame
+            manifests.append(table.manifest)
+        else:
+            manifests.append(
+                local_source_manifest(
+                    request.odre_regional_loads_path,
+                    "odre_regional_load_profiles",
+                )
+            )
     candidates: list[dict[str, str]] = []
     for site_id, links in links_by_site.items():
         for link in links:
@@ -223,27 +284,16 @@ def _public_evidence_profiles(
                 }
             )
     if not candidates:
-        return ()
-    return build_public_grid_evidence(
-        site_candidates=candidates,
-        regional_constraints=constraints,
-        storage_assets=storage,
-        regional_load_profiles=regional_loads,
-        eco2mix_annual=eco2mix,
-    )
-
-
-def _public_source_manifests(request: PortfolioWorkflowRequest) -> tuple[object, ...]:
-    paths = (
-        (request.odre_constraints_path, "odre_regional_constraints"),
-        (request.odre_storage_assets_path, "odre_storage_assets"),
-        (request.odre_regional_loads_path, "odre_regional_load_profiles"),
-        (request.eco2mix_annual_path, "eco2mix_annual"),
-    )
-    return tuple(
-        local_source_manifest(path, source_type)
-        for path, source_type in paths
-        if path is not None
+        return PublicEvidenceBundle((), tuple(manifests))
+    return PublicEvidenceBundle(
+        profiles=build_public_grid_evidence(
+            site_candidates=candidates,
+            regional_constraints=constraints,
+            storage_assets=storage,
+            regional_load_profiles=regional_loads,
+            eco2mix_annual=eco2mix,
+        ),
+        manifests=tuple(manifests),
     )
 
 
@@ -283,13 +333,8 @@ def _snapshot_datetime(value: str) -> datetime:
     return parsed
 
 
-def _local_file_manifest(path: Path, source_type: str) -> dict[str, object]:
-    return {
-        "source_type": source_type,
-        "path": str(path),
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        "size_bytes": path.stat().st_size,
-    }
+def _local_file_manifest(path: Path, source_type: str) -> object:
+    return local_source_manifest(path, source_type)
 
 
 def _load_osm_fixtures(path: Path) -> dict[str, object]:

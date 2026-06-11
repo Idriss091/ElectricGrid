@@ -1,0 +1,1 @@
+record_id,pilot_id,client_site_id,screening_policy_version,screening_class,screening_recommendation,region,voltage_kv,professionally_reviewed,deep_evidence_type,deep_evidence_outcome,actual_decision,abandonment_reason,outcome_date,notes

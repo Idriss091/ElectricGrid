@@ -14,6 +14,8 @@ from typing import Sequence
 from thesegrid.assessment import assess_connection
 from thesegrid.bundle import write_bundle_report
 from thesegrid.client_network import validate_client_network, write_client_network_validation
+from thesegrid.commercial_reporting import run_commercial_validation
+from thesegrid.commercial_validation import CommercialValidationError
 from thesegrid.constraints import ConstraintSettings
 from thesegrid.full_year_selection import (
     DEFAULT_FULL_YEAR_BAD_CONTROLS,
@@ -55,6 +57,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _screen(args)
     if args.command == "portfolio-screen":
         return _portfolio_screen(args)
+    if args.command == "pilot-evaluate":
+        return _pilot_evaluate(args)
     if args.command == "qsts":
         return _qsts(args)
     if args.command == "qsts-benchmark":
@@ -186,6 +190,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Optional JSON object of Overpass responses keyed by client_site_id",
     )
     portfolio_screen.add_argument(
+        "--odre-substations",
+        type=Path,
+        help="Optional local ODRE substation snapshot used to pin identity matching",
+    )
+    portfolio_screen.add_argument(
+        "--manual-reviews",
+        type=Path,
+        help="Optional reviewed CSV approving or rejecting Class A sites",
+    )
+    portfolio_screen.add_argument(
         "--odre-constraints",
         type=Path,
         help="Optional local ODRE contraintes-region.csv for public evidence scoring",
@@ -205,6 +219,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Optional local ECO2MIX annual TSV export, even when named .xls",
     )
+    pilot_evaluate = subparsers.add_parser(
+        "pilot-evaluate",
+        help="Evaluate interview, pilot, and ground-truth evidence against the V2 roadmap",
+    )
+    pilot_evaluate.add_argument("--interviews", required=True, type=Path)
+    pilot_evaluate.add_argument("--pilots", required=True, type=Path)
+    pilot_evaluate.add_argument("--ground-truth", required=True, type=Path)
+    pilot_evaluate.add_argument("--output", required=True, type=Path)
     qsts = subparsers.add_parser("qsts", help="Validate top screened buses with QSTS")
     qsts.add_argument("--network", required=True, help="SimBench code; 'toy' is refused for QSTS")
     qsts.add_argument("--screening-csv", required=True, type=Path, help="Input screening.csv path")
@@ -680,6 +702,8 @@ def _portfolio_screen(args: argparse.Namespace) -> int:
                 rte7000_snapshot=args.rte7000_snapshot,
                 search_radius_km=args.search_radius_km,
                 osm_fixture_path=args.osm_fixture,
+                odre_substations_path=args.odre_substations,
+                manual_reviews_path=args.manual_reviews,
                 odre_constraints_path=args.odre_constraints,
                 odre_storage_assets_path=args.odre_storage_assets,
                 odre_regional_loads_path=args.odre_regional_loads,
@@ -692,6 +716,23 @@ def _portfolio_screen(args: argparse.Namespace) -> int:
     print(
         f"portfolio-screen ranked {len(result.screening.ranked_sites)} sites: "
         f"{result.outputs.report_path} {result.outputs.manifest_path}"
+    )
+    return 0
+
+
+def _pilot_evaluate(args: argparse.Namespace) -> int:
+    try:
+        outputs = run_commercial_validation(
+            interviews_path=args.interviews,
+            pilots_path=args.pilots,
+            ground_truth_path=args.ground_truth,
+            output_dir=args.output,
+        )
+    except (CommercialValidationError, OSError, ValueError) as exc:
+        print(f"pilot-evaluate error: {exc}")
+        return 2
+    print(
+        f"pilot-evaluate: {outputs.summary_path} {outputs.report_path}"
     )
     return 0
 

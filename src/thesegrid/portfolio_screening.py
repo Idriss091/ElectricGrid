@@ -7,6 +7,7 @@ from typing import Literal
 
 from thesegrid.osm_substations import OsmSubstation
 from thesegrid.portfolio_input import PortfolioSite
+from thesegrid.portfolio_review import ManualReview
 from thesegrid.public_data.evidence import PublicGridEvidenceProfile
 from thesegrid.substation_identity import (
     CartostockSubstation,
@@ -17,12 +18,13 @@ from thesegrid.substation_identity import (
 )
 
 
-PORTFOLIO_SCREENING_POLICY_VERSION = "portfolio-geospatial-v0"
+PORTFOLIO_SCREENING_POLICY_VERSION = "portfolio-geospatial-v1"
 
 OpportunityClass = Literal["A", "B", "C", "D"]
 Recommendation = Literal["prioritize", "investigate", "hold", "reject"]
 EvidenceConfidence = Literal["high", "medium", "low", "unavailable"]
 DeepDiveRecommendation = Literal["recommended", "conditional", "not_recommended"]
+ManualReviewStatus = Literal["not_required", "pending", "approved", "rejected"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,11 @@ class SiteScreening:
     missing_evidence: tuple[str, ...]
     next_action: str
     deep_dive_recommendation: DeepDiveRecommendation = "not_recommended"
+    manual_review_required: bool = False
+    manual_review_status: ManualReviewStatus = "not_required"
+    manual_review_reviewer: str = ""
+    manual_reviewed_at_utc: str = ""
+    manual_review_notes: str = ""
 
 
 @dataclass(frozen=True)
@@ -79,11 +86,13 @@ def screen_portfolio(
     *,
     source_errors: Mapping[str, str] | None = None,
     public_evidence_profiles: Iterable[PublicGridEvidenceProfile] = (),
+    manual_reviews: Mapping[str, ManualReview] | None = None,
 ) -> PortfolioScreeningResult:
     cartostock_by_id = {
         record.cartostock_id: record for record in cartostock_substations
     }
     errors = dict(source_errors or {})
+    reviews = dict(manual_reviews or {})
     public_evidence_by_key = {
         (profile.client_site_id, profile.odre_code): profile
         for profile in public_evidence_profiles
@@ -113,6 +122,7 @@ def screen_portfolio(
                 site,
                 best_candidate,
                 source_error=errors.get(site.client_site_id),
+                manual_review=reviews.get(site.client_site_id),
             )
         )
 
@@ -194,6 +204,7 @@ def _build_site_screening(
     candidate: CandidateScreening | None,
     *,
     source_error: str | None,
+    manual_review: ManualReview | None,
 ) -> SiteScreening:
     dimensions = (
         _empty_dimensions(site)
@@ -211,6 +222,16 @@ def _build_site_screening(
     evidence_confidence = _evidence_confidence(candidate, source_error)
     missing_evidence = _missing_evidence(candidate, source_error)
     constraints = _likely_constraints(site, candidate)
+    review_required = opportunity_class == "A"
+    review_status: ManualReviewStatus = (
+        "pending"
+        if review_required and manual_review is None
+        else (
+            manual_review.status
+            if review_required and manual_review is not None
+            else "not_required"
+        )
+    )
     positive_signals = tuple(
         dimension.reason
         for dimension in sorted(
@@ -231,8 +252,19 @@ def _build_site_screening(
         strongest_positive_signals=positive_signals,
         likely_constraints=constraints,
         missing_evidence=missing_evidence,
-        next_action=_next_action(opportunity_class),
-        deep_dive_recommendation=_deep_dive_recommendation(opportunity_class, candidate),
+        next_action=_next_action(opportunity_class, review_status),
+        deep_dive_recommendation=_deep_dive_recommendation(
+            opportunity_class,
+            candidate,
+            review_status,
+        ),
+        manual_review_required=review_required,
+        manual_review_status=review_status,
+        manual_review_reviewer="" if manual_review is None else manual_review.reviewer,
+        manual_reviewed_at_utc=(
+            "" if manual_review is None else manual_review.reviewed_at_utc
+        ),
+        manual_review_notes="" if manual_review is None else manual_review.notes,
     )
 
 
@@ -420,20 +452,22 @@ def _public_evidence_for_candidate(
 
 def _public_grid_evidence_dimension(profile: PublicGridEvidenceProfile) -> ScoreDimension:
     if profile.missing_evidence:
-        completeness_points = int(round(profile.source_completeness_score * 6))
+        completeness_points = int(round(profile.source_completeness_score * 10))
         reason = (
             "ODRE/ECO2MIX public evidence is partial; missing "
             + ", ".join(profile.missing_evidence)
             + "."
         )
     else:
-        completeness_points = 6
+        completeness_points = 10
         reason = "ODRE/ECO2MIX public evidence is complete for this screening profile."
-    storage_points = 2 if profile.battery_storage_kw_region > 0 else 0
-    substation_points = 2 if profile.battery_storage_kw_source_substation > 0 else 0
+    reason += (
+        " Existing regional or source-substation battery capacity is contextual only "
+        "and is not scored as connection capacity evidence."
+    )
     return ScoreDimension(
         "public_grid_evidence",
-        min(10, completeness_points + storage_points + substation_points),
+        min(10, completeness_points),
         10,
         reason,
     )
@@ -552,7 +586,20 @@ def _likely_constraints(
     return tuple(constraints)
 
 
-def _next_action(opportunity_class: OpportunityClass) -> str:
+def _next_action(
+    opportunity_class: OpportunityClass,
+    manual_review_status: ManualReviewStatus,
+) -> str:
+    if opportunity_class == "A" and manual_review_status == "pending":
+        return (
+            "Complete mandatory manual review of canonical identity, voltage, "
+            "public evidence, and connection practicality before Deep Dive approval."
+        )
+    if opportunity_class == "A" and manual_review_status == "rejected":
+        return (
+            "Class A manual review rejected this shortlist entry; resolve the stated "
+            "evidence issue before reconsideration."
+        )
     return {
         "A": "Launch Deep Dive Site scoping and manually validate the canonical node.",
         "B": "Resolve missing identity or public evidence before Deep Dive selection.",
@@ -564,8 +611,13 @@ def _next_action(opportunity_class: OpportunityClass) -> str:
 def _deep_dive_recommendation(
     opportunity_class: OpportunityClass,
     candidate: CandidateScreening | None,
+    manual_review_status: ManualReviewStatus,
 ) -> DeepDiveRecommendation:
     if opportunity_class == "A" and candidate is not None:
+        if manual_review_status == "rejected":
+            return "not_recommended"
+        if manual_review_status != "approved":
+            return "conditional"
         if (
             candidate.public_evidence is not None
             and candidate.public_evidence.source_completeness_score >= 0.75

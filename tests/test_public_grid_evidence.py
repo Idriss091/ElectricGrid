@@ -48,7 +48,20 @@ def test_build_public_grid_evidence_aggregates_region_and_battery_signals():
         [{"region": "BRETAGNE", "date": "2026-06-09"}]
     )
     eco2mix = pd.DataFrame(
-        [{"timestamp": "2024-01-01 00:00:00"}, {"timestamp": "2024-01-01 00:15:00"}]
+        [
+            {
+                "timestamp": "2024-01-01 00:00:00",
+                "consumption_mw": 100.0,
+                "consumption_measurement_available": True,
+                "source_interval_minutes": 15,
+            },
+            {
+                "timestamp": "2024-01-01 00:15:00",
+                "consumption_mw": None,
+                "consumption_measurement_available": False,
+                "source_interval_minutes": 15,
+            },
+        ]
     )
 
     profiles = build_public_grid_evidence(
@@ -72,7 +85,11 @@ def test_build_public_grid_evidence_aggregates_region_and_battery_signals():
     assert profile.battery_storage_kwh_region == 3000.0
     assert profile.battery_storage_kw_source_substation == 1200.0
     assert profile.latest_regional_load_date == "2026-06-09"
-    assert profile.eco2mix_coverage_hours == 2
+    assert profile.eco2mix_record_count == 2
+    assert profile.eco2mix_source_interval_minutes == 15
+    assert profile.eco2mix_observed_consumption_count == 1
+    assert profile.eco2mix_missing_consumption_count == 1
+    assert profile.eco2mix_coverage_hours == 0.5
     assert profile.source_completeness_score == 1.0
     assert profile.missing_evidence == ()
 
@@ -92,6 +109,10 @@ def test_build_public_grid_evidence_records_missing_partial_sources():
     assert profile.regional_constraint_count == 0
     assert profile.battery_storage_kw_region == 0.0
     assert profile.latest_regional_load_date == ""
+    assert profile.eco2mix_record_count == 0
+    assert profile.eco2mix_source_interval_minutes is None
+    assert profile.eco2mix_observed_consumption_count == 0
+    assert profile.eco2mix_missing_consumption_count == 0
     assert profile.eco2mix_coverage_hours == 0
     assert profile.source_completeness_score == 0.0
     assert profile.missing_evidence == (

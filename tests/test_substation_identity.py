@@ -115,7 +115,32 @@ def test_load_odre_fetches_csv_normalizes_rows_and_records_provenance():
     assert result.manifest.source_type == "public_signal"
     assert result.manifest.row_count == 1
     assert result.manifest.retrieved_at_utc == "2026-06-11T14:00:00+00:00"
+    assert len(result.manifest.sha256) == 64
+    assert result.manifest.publisher == "RTE / ODRÉ"
+    assert result.manifest.license_name == "Licence Ouverte 2.0"
+    assert result.manifest.transformation_version == "odre-substations-v1"
     json.dumps(asdict(result.manifest))
+
+
+def test_load_odre_uses_hashed_local_snapshot_with_labelled_columns(tmp_path):
+    path = tmp_path / "postes-electriques-rte.csv"
+    path.write_text(
+        "Code poste;Nom poste;FONCTION;Etat;Tension (kV);departement\n"
+        "AIREP;AIRE-SUR-ADOUR;Poste de transformation;EN EXPLOITATION;63kV;Landes\n",
+        encoding="utf-8-sig",
+    )
+
+    result = load_odre_substations(
+        source_path=path,
+        now=lambda: datetime(2026, 6, 11, 14, 0, tzinfo=UTC),
+    )
+
+    assert result.substations[0].odre_code == "AIREP"
+    assert result.manifest.source_path == str(path)
+    assert result.manifest.source_url
+    assert len(result.manifest.sha256) == 64
+    assert result.manifest.file_modified_at_utc
+    assert result.manifest.retrieved_at_utc == "2026-06-11T14:00:00+00:00"
 
 
 def test_load_odre_rejects_missing_required_columns():

@@ -1,4 +1,5 @@
 from pathlib import Path
+import math
 
 import pandas as pd
 import pytest
@@ -29,6 +30,8 @@ def test_read_regional_constraints_handles_bom_and_required_columns(tmp_path: Pa
     assert result.frame.loc[0, "max_power_mw"] == 50.0
     assert result.frame.loc[0, "persistence"] == "ELEVEE"
     assert result.manifest.available is True
+    assert result.manifest.row_count == 1
+    assert result.manifest.transformation_version == "odre-regional-constraints-v1"
 
 
 def test_read_regional_constraints_rejects_schema_drift(tmp_path: Path):
@@ -69,6 +72,7 @@ def test_read_storage_assets_normalizes_battery_rows(tmp_path: Path):
     assert row["discharge_kw"] == 1000.0
     assert row["stockable_kwh"] == 2400.0
     assert row["installation_count"] == 1.0
+    assert result.manifest.row_count == 1
 
 
 def test_read_regional_load_profiles_normalizes_wide_half_hourly_rows(tmp_path: Path):
@@ -99,3 +103,31 @@ def test_read_regional_load_profiles_normalizes_wide_half_hourly_rows(tmp_path: 
     assert row["connection_voltage"] == "225 kV"
     assert row["daily_energy_mwh"] == 22.0
     assert row["max_half_hour_mw"] == 11.5
+    assert result.manifest.row_count == 1
+
+
+def test_odre_readers_preserve_missing_numeric_measurements(tmp_path: Path):
+    path = tmp_path / "soutirages-regionaux.csv"
+    pd.DataFrame(
+        [
+            {
+                "Date": "2026-06-09",
+                "Code INSEE région": "76",
+                "Région": "Occitanie",
+                "Secteur activité": "Grande Industrie",
+                "Code tension raccordement": "6",
+                "Tension raccordement": "225 kV",
+                "00h00": "",
+                "00h30": "",
+                "Nb points de soutirage": "",
+                "Energie journalière (MWh)": "",
+                "Qualité": "Provisoire",
+            }
+        ]
+    ).to_csv(path, index=False)
+
+    result = read_regional_load_profiles(path)
+
+    assert math.isnan(result.frame.loc[0, "withdrawal_point_count"])
+    assert math.isnan(result.frame.loc[0, "daily_energy_mwh"])
+    assert math.isnan(result.frame.loc[0, "max_half_hour_mw"])

@@ -20,9 +20,13 @@ class PublicGridEvidenceProfile:
     battery_storage_kwh_region: float
     battery_storage_kw_source_substation: float
     latest_regional_load_date: str
-    eco2mix_coverage_hours: int
+    eco2mix_coverage_hours: float
     source_completeness_score: float
     missing_evidence: tuple[str, ...]
+    eco2mix_record_count: int = 0
+    eco2mix_source_interval_minutes: int | None = None
+    eco2mix_observed_consumption_count: int = 0
+    eco2mix_missing_consumption_count: int = 0
 
 
 def build_public_grid_evidence(
@@ -85,7 +89,17 @@ def _profile_for_candidate(
             6,
         ),
         latest_regional_load_date=_latest_regional_load_date(regional_load_profiles, region),
-        eco2mix_coverage_hours=_coverage_rows(eco2mix_annual),
+        eco2mix_record_count=_eco2mix_record_count(eco2mix_annual),
+        eco2mix_source_interval_minutes=_eco2mix_source_interval_minutes(
+            eco2mix_annual
+        ),
+        eco2mix_observed_consumption_count=_eco2mix_observed_consumption_count(
+            eco2mix_annual
+        ),
+        eco2mix_missing_consumption_count=_eco2mix_missing_consumption_count(
+            eco2mix_annual
+        ),
+        eco2mix_coverage_hours=_eco2mix_coverage_hours(eco2mix_annual),
         source_completeness_score=source_completeness_score,
         missing_evidence=missing_evidence,
     )
@@ -163,7 +177,60 @@ def _latest_regional_load_date(frame: pd.DataFrame | None, region: str) -> str:
     return str(dates.max().date())
 
 
-def _coverage_rows(frame: pd.DataFrame | None) -> int:
+def _eco2mix_record_count(frame: pd.DataFrame | None) -> int:
     if frame is None or frame.empty:
         return 0
     return len(frame)
+
+
+def _eco2mix_source_interval_minutes(frame: pd.DataFrame | None) -> int | None:
+    if frame is None or frame.empty:
+        return None
+    if "source_interval_minutes" in frame:
+        values = pd.to_numeric(
+            frame["source_interval_minutes"],
+            errors="coerce",
+        ).dropna()
+        if not values.empty:
+            return int(values.mode().iloc[0])
+    if "timestamp" not in frame:
+        return None
+    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce").dropna()
+    differences = (
+        timestamps.sort_values()
+        .drop_duplicates()
+        .diff()
+        .dropna()
+        .dt.total_seconds()
+        .div(60)
+    )
+    positive_differences = differences[differences > 0]
+    if positive_differences.empty:
+        return None
+    return int(positive_differences.mode().iloc[0])
+
+
+def _eco2mix_observed_consumption_count(frame: pd.DataFrame | None) -> int:
+    if frame is None or frame.empty:
+        return 0
+    if "consumption_measurement_available" in frame:
+        availability = frame["consumption_measurement_available"].map(
+            lambda value: bool(value) if pd.notna(value) else False
+        )
+        return int(availability.sum())
+    if "consumption_mw" in frame:
+        return int(pd.to_numeric(frame["consumption_mw"], errors="coerce").notna().sum())
+    return 0
+
+
+def _eco2mix_missing_consumption_count(frame: pd.DataFrame | None) -> int:
+    if frame is None or frame.empty:
+        return 0
+    return len(frame) - _eco2mix_observed_consumption_count(frame)
+
+
+def _eco2mix_coverage_hours(frame: pd.DataFrame | None) -> float:
+    interval = _eco2mix_source_interval_minutes(frame)
+    if frame is None or frame.empty or interval is None:
+        return 0.0
+    return round(len(frame) * interval / 60.0, 6)
